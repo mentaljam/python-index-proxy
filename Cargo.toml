@@ -1,0 +1,41 @@
+[package]
+name = "python-index-proxy"
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+strip = "symbols"
+lto = true
+
+[dependencies]
+anyhow = "^1.0"
+async-stream = "^0.3"
+aws-region = { version = "^0.25", features = ["serde"] }
+axum = { version = "^0.7", features = ["macros"] }
+byte-unit-serde = "^0.1"
+bytes = "^1.6"
+config = { version = "^0.14", default-features = false, features = ["toml"] }
+futures = "^0.3"
+http = "*"
+humantime-serde = "^1.1"
+moka = { version = "^0.12", features = ["future"] }
+# opendal = "^0.45"
+quick-xml = { version = "^0.31", features = ["async-tokio"] }
+redb = "^2.0"
+reqwest = { version = "^0.12", features = [
+    "brotli",
+    "charset",
+    "deflate",
+    "gzip",
+    "http2",
+    "rustls-tls",
+], default-features = false }
+s3-tokio = "0.39"
+serde = { version = "^1.0", features = ["derive"] }
+serde_json = "^1.0"
+sha2 = "^0.10"
+tokio = { version = "^1.0", features = ["full"] }
+toml = "^0.8"
+tracing = "^0.1"
+tracing-subscriber = { version = "^0.3", features = ["env-filter"] }
+url = "^2.5"
