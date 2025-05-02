@@ -4,6 +4,7 @@ volumes:
 services:
   minio:
     image: minio/minio
+    restart: unless-stopped
     command: server --console-address ':9001' /data
     environment:
       MINIO_ROOT_USER: minioadmin
