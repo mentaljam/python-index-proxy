@@ -15,5 +15,8 @@ RUN cargo build --release --target x86_64-unknown-linux-musl
 
 FROM scratch
 ENV PIPR_BIND=0.0.0.0:3000
-COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/python-index-proxy /python-index-proxy
-ENTRYPOINT [ "/python-index-proxy" ]
+COPY docker/passwd /etc/
+USER 65534
+WORKDIR /var/lib/python-index-proxy
+COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/python-index-proxy /bin/python-index-proxy
+ENTRYPOINT [ "/bin/python-index-proxy" ]
