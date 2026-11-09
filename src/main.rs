@@ -8,6 +8,7 @@ use axum::{
 };
 use state::File;
 use tokio::{net::TcpListener, signal};
+use tower_http::compression::CompressionLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::settings::Settings;
@@ -67,6 +68,7 @@ fn get_router(base_url: &str) -> Router<state::State> {
     let router = Router::new()
         .route("/", get(list_indices))
         .route("/{index}/{package}/", get(get_detail))
+        .layer(CompressionLayer::new())
         .route("/packages/{index}/{package}/{hash}/{file}", get(get_file));
 
     if base_url == "/" {
