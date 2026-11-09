@@ -6,7 +6,7 @@ use futures::{Stream, TryStreamExt};
 use moka::future::Cache;
 use opendal::Operator;
 use quick_xml::{events::Event, reader::Reader as XmlReader};
-use redb::{Database, ReadableDatabase, Table, TableDefinition, WriteTransaction};
+use redb::{Database, ReadableDatabase, TableDefinition, WriteTransaction};
 use reqwest::Client;
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
@@ -32,50 +32,43 @@ impl State {
         index_slug: String,
         package: String,
     ) -> anyhow::Result<Option<Bytes>> {
-        let data = self.0.read().await;
+        let (index_cache, http_client, base_url, url_templates) = {
+            let data = self.0.read().await;
+            (
+                data.index_cache.clone(),
+                data.http_client.clone(),
+                data.base_url.clone(),
+                data.indices.get(&index_slug).cloned(),
+            )
+        };
         let cache_key = format!("{index_slug}/{package}");
-        let index = data.index_cache.get(&cache_key).await;
+        let index = index_cache.get(&cache_key).await;
         if index.is_some() {
             return Ok(index);
         }
-
-        drop(data);
-        let data = self.0.write().await;
-        let txn = data.db.begin_write()?;
-        let mut parser = DetailParser::new(&data.base_url, &txn)?;
-        let url_templates = match data.indices.get(&index_slug) {
-            Some(u) => u,
-            None => return Ok(None),
+        let Some(url_templates) = url_templates else {
+            return Ok(None);
         };
 
+        let mut parser = DetailParser::new(&base_url);
         for url_template in url_templates {
             let package_url = url_template.package_url(&package)?;
-            let response = data
-                .http_client
-                .get(package_url.clone())
-                // .header(header::ACCEPT, VND_PYPI_SIMPLE_V1_JSON)
-                .send()
-                .await?;
+            let response = http_client.get(package_url.clone()).send().await?;
             if response.status().is_success() {
-                // let content_type = response
-                //     .headers()
-                //     .get(header::CONTENT_TYPE)
-                //     .map(header::HeaderValue::to_owned);
                 let details = response.bytes().await?;
-                // match content_type {
-                //     Some(h) if h == VND_PYPI_SIMPLE_V1_JSON => {
-                //         parser.parse_json(&package_url, details).await?
-                //     }
-                //     _ => parser.parse_html(&package_url, details).await?,
-                // }
-                parser.parse_html(&package_url, details).await?
+                parser.parse_html(&package_url, details).await?;
             }
         }
 
+        {
+            let data = self.0.read().await;
+            let txn = data.db.begin_write()?;
+            parser.persist(&txn)?;
+            txn.commit()?;
+        }
         let index = parser.finalize();
-        txn.commit()?;
         if let Some(index) = &index {
-            data.index_cache.insert(cache_key, index.clone()).await;
+            index_cache.insert(cache_key, index.clone()).await;
         }
         Ok(index)
     }
@@ -360,6 +353,7 @@ struct StateData {
     download_locks: HashMap<String, Arc<RwLock<()>>>,
 }
 
+#[derive(Clone)]
 struct IndexUrlTemplate(String);
 
 impl IndexUrlTemplate {
@@ -368,23 +362,31 @@ impl IndexUrlTemplate {
     }
 }
 
-struct DetailParser<'tnx> {
-    file_links: Table<'tnx, &'static str, String>,
+struct DetailParser {
+    file_links: Vec<(String, String)>,
     link_count: usize,
     html: Vec<u8>,
     buf: Vec<u8>,
     anchor_start: String,
 }
 
-impl<'txn> DetailParser<'txn> {
-    fn new(base_url: &str, txn: &'txn WriteTransaction) -> anyhow::Result<Self> {
-        Ok(Self {
-            file_links: txn.open_table(FILE_LINK_TABLE)?,
+impl DetailParser {
+    fn new(base_url: &str) -> Self {
+        Self {
+            file_links: Vec::new(),
             link_count: 0,
             html: Vec::from(b"<!DOCTYPE html>\n<html>\n<body>\n"),
             buf: Vec::new(),
             anchor_start: format!(r#"<a href="{}packages/"#, base_url),
-        })
+        }
+    }
+
+    fn persist(&self, txn: &WriteTransaction) -> anyhow::Result<()> {
+        let mut table = txn.open_table(FILE_LINK_TABLE)?;
+        for (hash, url) in &self.file_links {
+            table.insert(hash.as_str(), url)?;
+        }
+        Ok(())
     }
 
     // async fn parse_json(&mut self, package_url: &Url, content: Bytes) -> anyhow::Result<()> {
@@ -447,7 +449,7 @@ impl<'txn> DetailParser<'txn> {
                             html.push(b'>');
 
                             let url = make_absolute(package_url, url)?;
-                            file_links.insert(hex.as_str(), &url)?;
+                            file_links.push((hex, url));
                             *link_count += 1;
                         }
                     }
@@ -530,6 +532,109 @@ mod storage_tests {
     use super::*;
     use futures::TryStreamExt;
     use redb::ReadableTable;
+
+    #[tokio::test]
+    async fn slow_index_fetch_does_not_block_unrelated_requests() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let body_started = Arc::new(tokio::sync::Notify::new());
+            let release_body = Arc::new(tokio::sync::Notify::new());
+            let app = axum::Router::new().route(
+                "/{package}/",
+                axum::routing::get({
+                    let body_started = body_started.clone();
+                    let release_body = release_body.clone();
+                    move |axum::extract::Path(package): axum::extract::Path<String>| {
+                        let body_started = body_started.clone();
+                        let release_body = release_body.clone();
+                        async move {
+                            axum::body::Body::from_stream(async_stream::stream! {
+                                if package == "slow" {
+                                    body_started.notify_one();
+                                    release_body.notified().await;
+                                }
+                                yield Ok::<_, std::io::Error>(Bytes::from(format!(
+                                    "<a href=\"{package}.whl\">{package}.whl</a>",
+                                )));
+                            })
+                        }
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let upstream = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let root = std::env::temp_dir().join(format!(
+                "pipr-index-lock-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            let mut settings = Settings::template();
+            settings.db_path = root.join("metadata.redb");
+            settings.indices =
+                [("default".into(), vec![format!("{endpoint}/{{package}}/")])].into();
+            let mut config = opendal::services::FsConfig::default();
+            config.root = Some(root.join("artifacts").to_str().unwrap().into());
+            settings.storage = crate::storage::Storage::Fs(config);
+            let state = State::try_from(settings).unwrap();
+            let slow = tokio::spawn({
+                let state = state.clone();
+                async move { state.get_detail("default".into(), "slow".into()).await }
+            });
+            body_started.notified().await;
+            let indices = tokio::time::timeout(Duration::from_secs(1), state.get_indices_list())
+                .await
+                .expect("slow upstream body must not block unrelated state reads");
+            assert!(indices.contains("default"));
+            {
+                let data = state.0.read().await;
+                let txn = data
+                    .db
+                    .try_begin_write()
+                    .expect("slow upstream body must not retain a database write transaction");
+                drop(txn);
+            }
+            let fast = tokio::time::timeout(
+                Duration::from_secs(1),
+                state.get_detail("default".into(), "fast".into()),
+            )
+            .await
+            .expect("slow upstream body must not hold the database write transaction")
+            .unwrap()
+            .unwrap();
+            assert!(std::str::from_utf8(&fast).unwrap().contains("/fast.whl\""));
+            release_body.notify_one();
+            let slow = slow.await.unwrap().unwrap().unwrap();
+            assert!(std::str::from_utf8(&slow).unwrap().contains("/slow.whl\""));
+            let data = state.0.read().await;
+            let txn = data.db.begin_read().unwrap();
+            let table = txn.open_table(FILE_LINK_TABLE).unwrap();
+            let mut urls: Vec<_> = table
+                .iter()
+                .unwrap()
+                .map(|row| row.unwrap().1.value())
+                .collect();
+            urls.sort();
+            assert_eq!(
+                urls,
+                [
+                    format!("{endpoint}/fast/fast.whl"),
+                    format!("{endpoint}/slow/slow.whl")
+                ]
+            );
+            drop(table);
+            drop(txn);
+            drop(data);
+            upstream.abort();
+            drop(state);
+            std::fs::remove_dir_all(root).unwrap();
+        })
+        .await
+        .expect("index concurrency regression must finish");
+    }
 
     #[tokio::test]
     async fn index_cache_capacity_counts_key_and_payload_bytes() {
@@ -632,7 +737,7 @@ mod storage_tests {
         ];
         for (href, expected_file, expected_upstream, expected_identifier) in cases {
             let txn = db.begin_write().unwrap();
-            let mut parser = DetailParser::new("/proxy/", &txn).unwrap();
+            let mut parser = DetailParser::new("/proxy/");
             parser
                 .parse_html(
                     &package_url,
@@ -640,6 +745,7 @@ mod storage_tests {
                 )
                 .await
                 .unwrap();
+            parser.persist(&txn).unwrap();
             let html = String::from_utf8(parser.finalize().unwrap().to_vec()).unwrap();
             let rewritten = html
                 .split("href=\"")
