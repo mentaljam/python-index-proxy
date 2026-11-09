@@ -81,6 +81,9 @@ impl State {
     }
 
     pub async fn get_file(&self, hash: String, file: String) -> anyhow::Result<File> {
+        if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Ok(File::None);
+        }
         tracing::debug!("processing request for {file}");
         let object_path = format!("{}/{}/{hash}/{file}", &hash[0..2], &hash[2..4]);
 
@@ -603,6 +606,77 @@ mod storage_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[tokio::test]
+    async fn get_file_rejects_malformed_identifiers_before_storage_lookup() {
+        let root = std::env::temp_dir().join(format!(
+            "pipr-invalid-identifiers-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut settings = Settings::template();
+        settings.db_path = root.join("metadata.redb");
+        let mut config = opendal::services::FsConfig::default();
+        config.root = Some(root.join("artifacts").to_str().unwrap().into());
+        settings.storage = crate::storage::Storage::Fs(config);
+        let state = State::try_from(settings).unwrap();
+        let storage = state.0.read().await.storage.clone();
+        let nonhex = "g".repeat(64);
+        storage
+            .write(
+                format!("gg/gg/{nonhex}/package.whl").as_str(),
+                "invalid-key artifact",
+            )
+            .await
+            .unwrap();
+        let invalid = [
+            String::new(),
+            "a".into(),
+            "abc".into(),
+            "a".repeat(63),
+            "a".repeat(65),
+            nonhex,
+            "é".repeat(32),
+            format!("€{}", "a".repeat(61)),
+            format!("aé{}", "a".repeat(61)),
+        ];
+        for hash in invalid {
+            assert!(
+                matches!(
+                    state
+                        .get_file(hash.clone(), "package.whl".into())
+                        .await
+                        .unwrap(),
+                    File::None
+                ),
+                "malformed identifier must not resolve: {hash:?}"
+            );
+        }
+        // A valid cached identifier must still resolve without a database mapping.
+        let hash = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        storage
+            .write(
+                format!("ab/cd/{hash}/package.whl").as_str(),
+                "valid artifact",
+            )
+            .await
+            .unwrap();
+        let File::Stream(stream) = state
+            .get_file(hash.into(), "package.whl".into())
+            .await
+            .unwrap()
+        else {
+            panic!("valid cached identifier must stream")
+        };
+        let chunks: Vec<Bytes> = stream.try_collect().await.unwrap();
+        assert_eq!(chunks.concat(), b"valid artifact");
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     async fn failed_download_fixture(
         body: Bytes,
         truncated: bool,
@@ -649,7 +723,10 @@ mod storage_tests {
             let txn = data.db.begin_write().unwrap();
             txn.open_table(FILE_LINK_TABLE)
                 .unwrap()
-                .insert("abcd0123456789", url)
+                .insert(
+                    "abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab",
+                    url,
+                )
                 .unwrap();
             txn.commit().unwrap();
         }
@@ -662,7 +739,7 @@ mod storage_tests {
             let body = Bytes::from(vec![42; CHUNK_SIZE * 2]);
             let (state, root, upstream) = failed_download_fixture(body.clone(), false).await;
             let File::Stream(mut stream) = state
-                .get_file("abcd0123456789".into(), "package.whl".into())
+                .get_file("abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab".into(), "package.whl".into())
                 .await
                 .unwrap()
             else {
@@ -670,7 +747,7 @@ mod storage_tests {
             };
             // Start the writer, then prevent its final atomic rename from succeeding.
             assert!(!stream.try_next().await.unwrap().unwrap().is_empty());
-            let object = root.join("artifacts/ab/cd/abcd0123456789/package.whl");
+            let object = root.join("artifacts/ab/cd/abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab/package.whl");
             std::fs::create_dir_all(&object).unwrap();
             assert!(stream.try_collect::<Vec<_>>().await.is_err());
             assert!(state.0.read().await.download_locks.is_empty());
@@ -683,7 +760,7 @@ mod storage_tests {
             );
             std::fs::remove_dir(&object).unwrap();
             let File::Stream(stream) = state
-                .get_file("abcd0123456789".into(), "package.whl".into())
+                .get_file("abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab".into(), "package.whl".into())
                 .await
                 .unwrap()
             else {
@@ -709,7 +786,7 @@ mod storage_tests {
                 let (state, root, upstream) =
                     failed_download_fixture(Bytes::from(vec![42; size]), true).await;
                 match state
-                    .get_file("abcd0123456789".into(), "package.whl".into())
+                    .get_file("abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab".into(), "package.whl".into())
                     .await
                 {
                     Err(_) if size < CHUNK_SIZE => {}
@@ -721,7 +798,7 @@ mod storage_tests {
                 assert!(state.0.read().await.download_locks.is_empty());
                 assert!(
                     !root
-                        .join("artifacts/ab/cd/abcd0123456789/package.whl")
+                        .join("artifacts/ab/cd/abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab/package.whl")
                         .exists()
                 );
                 assert_eq!(
@@ -756,7 +833,7 @@ mod storage_tests {
         config.root = Some(root.join("artifacts").to_str().unwrap().into());
         settings.storage = crate::storage::Storage::Fs(config);
         let state = State::try_from(settings).unwrap();
-        let hash = "abcd0123456789";
+        let hash = "abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab";
         let file_lock = Arc::new(RwLock::new(()));
         let active_download = file_lock.write().await;
         state
@@ -772,7 +849,7 @@ mod storage_tests {
         let storage = state.0.read().await.storage.clone();
         storage
             .write(
-                "ab/cd/abcd0123456789/package.whl",
+                "ab/cd/abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab/package.whl",
                 Bytes::from_static(b"finished artifact"),
             )
             .await
