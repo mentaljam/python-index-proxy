@@ -139,62 +139,83 @@ impl State {
 
         tracing::debug!("downloading {file}");
         let mut buffered_reader = BufferedResponseReader(response);
-        let buf = match buffered_reader.chunk().await? {
-            Some(buf) if buf.len() < CHUNK_SIZE - 1 => {
+        let buf = match buffered_reader.chunk().await {
+            Ok(Some(buf)) if buf.len() < CHUNK_SIZE - 1 => {
                 let _file_write_guard = file_lock.write().await;
-                self.0
-                    .read()
-                    .await
-                    .storage
-                    .write(&object_path, buf.clone())
-                    .await?;
-                self.0.write().await.download_locks.remove(&hash);
+                let storage = self.0.read().await.storage.clone();
+                let result = storage.write(&object_path, buf.clone()).await;
+                remove_download_lock(&self.0, &hash, &file_lock).await;
+                result?;
                 return Ok(File::Bytes(buf));
             }
-            Some(buf) => buf,
-            None => return Ok(File::None),
+            Ok(Some(buf)) => buf,
+            Ok(None) => {
+                remove_download_lock(&self.0, &hash, &file_lock).await;
+                return Ok(File::None);
+            }
+            Err(err) => {
+                remove_download_lock(&self.0, &hash, &file_lock).await;
+                return Err(err.into());
+            }
         };
 
         let data_ptr = self.0.clone();
         let stream = async_stream::stream! {
             let _file_write_guard = file_lock.write().await;
-            let data = data_ptr.read().await;
-            let mut writer = data.storage.writer_with(&object_path)
-                .content_type(&content_type).chunk(CHUNK_SIZE).await?;
-
-            if let Err(err) = writer.write(buf.clone()).await {
-                let _ = writer.abort().await;
-                Err(err)?;
-            }
-            yield Ok(buf);
-
-            loop {
-                let next = match buffered_reader.chunk().await {
-                    Ok(next) => next,
-                    Err(err) => {
-                        let _ = writer.abort().await;
-                        Err(err)?;
-                        unreachable!();
-                    }
+            let storage = data_ptr.read().await.storage.clone();
+            // Finish cleanup before exposing an error: the consumer may stop polling then.
+            let result: anyhow::Result<()> = 'upload: {
+                let mut writer = match storage.writer_with(&object_path)
+                    .content_type(&content_type).chunk(CHUNK_SIZE).await {
+                    Ok(writer) => writer,
+                    Err(err) => break 'upload Err(err.into()),
                 };
-                let Some(buf) = next else { break };
+
                 if let Err(err) = writer.write(buf.clone()).await {
                     let _ = writer.abort().await;
-                    Err(err)?;
+                    break 'upload Err(err.into());
                 }
                 yield Ok(buf);
-            }
-            if let Err(err) = writer.close().await {
-                let _ = writer.abort().await;
-                Err(err)?;
-            }
 
-            // drop(file_write_guard);
-            drop(data);
-            data_ptr.write().await.download_locks.remove(&hash);
+                loop {
+                    let next = match buffered_reader.chunk().await {
+                        Ok(next) => next,
+                        Err(err) => {
+                            let _ = writer.abort().await;
+                            break 'upload Err(err.into());
+                        }
+                    };
+                    let Some(buf) = next else { break };
+                    if let Err(err) = writer.write(buf.clone()).await {
+                        let _ = writer.abort().await;
+                        break 'upload Err(err.into());
+                    }
+                    yield Ok(buf);
+                }
+                if let Err(err) = writer.close().await {
+                    let _ = writer.abort().await;
+                    break 'upload Err(err.into());
+                }
+                Ok(())
+            };
+            remove_download_lock(&data_ptr, &hash, &file_lock).await;
+            if let Err(err) = result {
+                yield Err(err);
+            }
         };
 
         Ok(File::Stream(Box::pin(stream)))
+    }
+}
+
+async fn remove_download_lock(state: &RwLock<StateData>, hash: &str, lock: &Arc<RwLock<()>>) {
+    let mut data = state.write().await;
+    if data
+        .download_locks
+        .get(hash)
+        .is_some_and(|current| Arc::ptr_eq(current, lock))
+    {
+        data.download_locks.remove(hash);
     }
 }
 
@@ -492,6 +513,142 @@ fn format_indices_list(base_url: &str, indices: &HashMap<String, Vec<String>>) -
 mod storage_tests {
     use super::*;
     use futures::TryStreamExt;
+
+    async fn failed_download_fixture(
+        body: Bytes,
+        truncated: bool,
+    ) -> (State, std::path::PathBuf, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/package.whl", listener.local_addr().unwrap());
+        let upstream = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    assert!(request.len() < 8192, "request headers must be bounded");
+                    request.push(socket.read_u8().await.unwrap());
+                }
+                // Close each connection so retries receive a fresh response.
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len() + usize::from(truncated),
+                );
+                socket.write_all(header.as_bytes()).await.unwrap();
+                socket.write_all(&body).await.unwrap();
+                socket.shutdown().await.unwrap();
+            }
+        });
+        let root = std::env::temp_dir().join(format!(
+            "pipr-failed-download-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut settings = Settings::template();
+        settings.db_path = root.join("metadata.redb");
+        let mut config = opendal::services::FsConfig::default();
+        config.root = Some(root.join("artifacts").to_str().unwrap().into());
+        settings.storage = crate::storage::Storage::Fs(config);
+        let state = State::try_from(settings).unwrap();
+        {
+            let data = state.0.read().await;
+            let txn = data.db.begin_write().unwrap();
+            txn.open_table(FILE_LINK_TABLE)
+                .unwrap()
+                .insert("abcd0123456789", url)
+                .unwrap();
+            txn.commit().unwrap();
+        }
+        (state, root, upstream)
+    }
+
+    #[tokio::test]
+    async fn failed_writer_close_aborts_cleans_up_and_allows_retry() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let body = Bytes::from(vec![42; CHUNK_SIZE * 2]);
+            let (state, root, upstream) = failed_download_fixture(body.clone(), false).await;
+            let File::Stream(mut stream) = state
+                .get_file("abcd0123456789".into(), "package.whl".into())
+                .await
+                .unwrap()
+            else {
+                panic!("large download must stream")
+            };
+            // Start the writer, then prevent its final atomic rename from succeeding.
+            assert!(!stream.try_next().await.unwrap().unwrap().is_empty());
+            let object = root.join("artifacts/ab/cd/abcd0123456789/package.whl");
+            std::fs::create_dir_all(&object).unwrap();
+            assert!(stream.try_collect::<Vec<_>>().await.is_err());
+            assert!(state.0.read().await.download_locks.is_empty());
+            assert_eq!(
+                std::fs::read_dir(root.join("artifacts/.tmp"))
+                    .unwrap()
+                    .count(),
+                0,
+                "failed writer must abort and remove its temporary artifact"
+            );
+            std::fs::remove_dir(&object).unwrap();
+            let File::Stream(stream) = state
+                .get_file("abcd0123456789".into(), "package.whl".into())
+                .await
+                .unwrap()
+            else {
+                panic!("retry must download again")
+            };
+            let chunks = stream.try_collect::<Vec<_>>().await.unwrap();
+            assert_eq!(chunks.concat(), body.as_ref());
+            assert_eq!(std::fs::read(&object).unwrap(), body.as_ref());
+            assert!(state.0.read().await.download_locks.is_empty());
+            upstream.abort();
+            drop(state);
+            std::fs::remove_dir_all(root).unwrap();
+        })
+        .await
+        .expect("download failure handling must finish");
+    }
+
+    #[tokio::test]
+    async fn upstream_body_failure_aborts_without_publishing_and_cleans_up() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            // Both the initial buffered read and a read after streaming has started can fail.
+            for size in [64, CHUNK_SIZE * 2] {
+                let (state, root, upstream) =
+                    failed_download_fixture(Bytes::from(vec![42; size]), true).await;
+                match state
+                    .get_file("abcd0123456789".into(), "package.whl".into())
+                    .await
+                {
+                    Err(_) if size < CHUNK_SIZE => {}
+                    Ok(File::Stream(stream)) if size > CHUNK_SIZE => {
+                        assert!(stream.try_collect::<Vec<_>>().await.is_err());
+                    }
+                    _ => panic!("truncated response must fail"),
+                }
+                assert!(state.0.read().await.download_locks.is_empty());
+                assert!(
+                    !root
+                        .join("artifacts/ab/cd/abcd0123456789/package.whl")
+                        .exists()
+                );
+                assert_eq!(
+                    std::fs::read_dir(root.join("artifacts/.tmp"))
+                        .unwrap()
+                        .count(),
+                    0
+                );
+                upstream.abort();
+                drop(state);
+                std::fs::remove_dir_all(root).unwrap();
+            }
+        })
+        .await
+        .expect("download failure handling must finish");
+    }
 
     #[tokio::test]
     async fn waiting_download_allows_active_download_to_finish() {
