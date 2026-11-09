@@ -240,6 +240,10 @@ impl TryFrom<Settings> for State {
         let index_cache = Cache::builder()
             .time_to_live(index_cache.ttl.into())
             .max_capacity(index_cache.max_capacity.into())
+            // Account for key and payload bytes, not allocator or cache overhead.
+            .weigher(|key: &String, value: &Bytes| {
+                u32::try_from(key.len().saturating_add(value.len())).unwrap_or(u32::MAX)
+            })
             .build();
 
         let indices_list = format_indices_list(&base_url, &indices);
@@ -526,6 +530,66 @@ mod storage_tests {
     use super::*;
     use futures::TryStreamExt;
     use redb::ReadableTable;
+
+    #[tokio::test]
+    async fn index_cache_capacity_counts_key_and_payload_bytes() {
+        let root = std::env::temp_dir().join(format!(
+            "pipr-cache-capacity-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut settings = Settings::template();
+        settings.db_path = root.join("metadata.redb");
+        settings.index_cache = toml::from_str("max_capacity = '12 B'").unwrap();
+        let mut config = opendal::services::FsConfig::default();
+        config.root = Some(root.join("artifacts").to_str().unwrap().into());
+        settings.storage = crate::storage::Storage::Fs(config);
+        let state = State::try_from(settings).unwrap();
+        let cache = state.0.read().await.index_cache.clone();
+
+        // Four UTF-8 key bytes and eight payload bytes exactly fill the budget.
+        cache
+            .insert("é/x".into(), Bytes::from_static(b"12345678"))
+            .await;
+        cache.run_pending_tasks().await;
+        assert_eq!(cache.weighted_size(), 12);
+        assert_eq!(cache.get("é/x").await.as_deref(), Some(&b"12345678"[..]));
+        cache.invalidate_all();
+        cache.run_pending_tasks().await;
+
+        for (key, value) in [
+            ("key", Bytes::from_static(b"1234567890")),
+            ("long-cache-key", Bytes::new()),
+        ] {
+            cache.insert(key.into(), value).await;
+            cache.run_pending_tasks().await;
+            assert!(
+                cache.get(key).await.is_none(),
+                "oversized entry must not remain: {key}"
+            );
+        }
+
+        // Each entry fits separately, but the pair must not remain together.
+        cache
+            .insert("a".into(), Bytes::from_static(b"12345678"))
+            .await;
+        cache.run_pending_tasks().await;
+        assert!(cache.get("a").await.is_some());
+        cache
+            .insert("b".into(), Bytes::from_static(b"12345678"))
+            .await;
+        cache.run_pending_tasks().await;
+        assert_eq!(cache.entry_count(), 1);
+        assert_eq!(cache.weighted_size(), 9);
+
+        drop(cache);
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[tokio::test]
     async fn rewritten_file_links_preserve_fragments_without_changing_fetch_urls() {
