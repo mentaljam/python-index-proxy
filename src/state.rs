@@ -404,7 +404,12 @@ impl<'txn> DetailParser<'txn> {
                 Event::Start(e) if e.name().as_ref() == "a" => {
                     in_a = true;
                     if let Some(href) = e.try_get_attribute("href")? {
-                        let url = href.value.split('#').next().unwrap();
+                        let (url, fragment) = href
+                            .value
+                            .split_once('#')
+                            .map_or((href.value.as_ref(), None), |(url, fragment)| {
+                                (url, Some(fragment))
+                            });
                         if let Some(file) = url.rsplit('/').next() {
                             let hash = Sha256::digest(href.value.as_bytes());
                             let hex = hex::encode(hash);
@@ -419,6 +424,10 @@ impl<'txn> DetailParser<'txn> {
                             html.extend(hex.as_bytes());
                             html.push(b'/');
                             html.extend(file.as_bytes());
+                            if let Some(fragment) = fragment {
+                                html.push(b'#');
+                                html.extend(fragment.as_bytes());
+                            }
                             html.push(b'"');
                             for attr in attributes {
                                 let attr = attr?;
@@ -513,6 +522,86 @@ fn format_indices_list(base_url: &str, indices: &HashMap<String, Vec<String>>) -
 mod storage_tests {
     use super::*;
     use futures::TryStreamExt;
+    use redb::ReadableTable;
+
+    #[tokio::test]
+    async fn rewritten_file_links_preserve_fragments_without_changing_fetch_urls() {
+        let root = std::env::temp_dir().join(format!(
+            "pipr-link-fragments-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let db = Database::create(root.join("metadata.redb")).unwrap();
+        let package_url = Url::parse("https://index.example.test/simple/package/").unwrap();
+        let cases = [
+            (
+                "https://files.example.test/package.whl#sha256=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                "package.whl#sha256=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                "https://files.example.test/package.whl",
+                "6a16a8955b2babddb0c3ad773fc7a6add3f0b2689d00db155a068757728981f8",
+            ),
+            (
+                "../../files/package.tar.gz#sha256=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                "package.tar.gz#sha256=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                "https://index.example.test/files/package.tar.gz",
+                "07bdb75e783010a2edc6fd45fe244662ecba7e483d2ca856053bbe2482c728a5",
+            ),
+            (
+                "package.zip",
+                "package.zip",
+                "https://index.example.test/simple/package/package.zip",
+                "325f0f32c85c47a2de246674622845902200ac65e955be08942b31496c5e7ae1",
+            ),
+            (
+                "package.zip#custom=value#extra",
+                "package.zip#custom=value#extra",
+                "https://index.example.test/simple/package/package.zip",
+                "c30b441a46793feb524598937ee624b7c1d69b3a5beef092d1ea859d7925b5ab",
+            ),
+        ];
+        for (href, expected_file, expected_upstream, expected_identifier) in cases {
+            let txn = db.begin_write().unwrap();
+            let mut parser = DetailParser::new("/proxy/", &txn).unwrap();
+            parser
+                .parse_html(
+                    &package_url,
+                    format!(r#"<a href="{href}">package</a>"#).into(),
+                )
+                .await
+                .unwrap();
+            let html = String::from_utf8(parser.finalize().unwrap().to_vec()).unwrap();
+            let rewritten = html
+                .split("href=\"")
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap();
+            let (identifier, file) = rewritten
+                .strip_prefix("/proxy/packages/")
+                .unwrap()
+                .split_once('/')
+                .unwrap();
+            assert_eq!(identifier, expected_identifier);
+            assert_eq!(file, expected_file);
+            assert_eq!(
+                txn.open_table(FILE_LINK_TABLE)
+                    .unwrap()
+                    .get(identifier)
+                    .unwrap()
+                    .unwrap()
+                    .value(),
+                expected_upstream
+            );
+            txn.commit().unwrap();
+        }
+        drop(db);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     async fn failed_download_fixture(
         body: Bytes,
