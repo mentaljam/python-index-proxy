@@ -10,7 +10,6 @@ lto = true
 [dependencies]
 anyhow = "^1.0"
 async-stream = "^0.3"
-aws-region = { version = "^0.27", features = ["serde"] }
 axum = { version = "^0.8", features = ["macros"] }
 byte-unit-serde = "^0.1"
 bytes = "^1.12"
@@ -20,7 +19,7 @@ hex = "^0.4"
 http = "*"
 humantime-serde = "^1.1"
 moka = { version = "^0.12", features = ["future"] }
-# opendal = "^0.45"
+opendal = { version = "=0.58.2", default-features = false, features = ["executors-tokio", "http-transport-reqwest-rustls"] }
 quick-xml = { version = "^0.42", features = ["async-tokio"] }
 redb = "^4.5"
 redb_legacy = { package = "redb", version = "~2.6" }
@@ -33,7 +32,6 @@ reqwest = { version = "^0.13", features = [
     "rustls",
 ], default-features = false }
 rustls = { version = "^0.23", default-features = false, features = ["aws-lc-rs"] }
-s3-tokio = "0.39"
 serde = { version = "^1.0", features = ["derive"] }
 serde_json = "^1.0"
 sha2 = "^0.11"
@@ -42,3 +40,71 @@ toml = "^1.2"
 tracing = "^0.1"
 tracing-subscriber = { version = "^0.3", features = ["env-filter"] }
 url = "^2.5"
+
+[features]
+default = ["storage-fs", "storage-s3", "storage-gcs", "storage-azblob"]
+storage-aliyun-drive = ["opendal/services-aliyun-drive"]
+storage-alluxio = ["opendal/services-alluxio"]
+storage-azblob = ["opendal/services-azblob"]
+storage-azdls = ["opendal/services-azdls"]
+storage-azfile = ["opendal/services-azfile"]
+storage-b2 = ["opendal/services-b2"]
+storage-cacache = ["opendal/services-cacache"]
+storage-cloudflare-kv = ["opendal/services-cloudflare-kv"]
+storage-compfs = ["opendal/services-compfs"]
+storage-cos = ["opendal/services-cos"]
+storage-d1 = ["opendal/services-d1"]
+storage-dashmap = ["opendal/services-dashmap"]
+storage-dbfs = ["opendal/services-dbfs"]
+storage-dropbox = ["opendal/services-dropbox"]
+storage-etcd = ["opendal/services-etcd"]
+storage-foundationdb = ["opendal/services-foundationdb"]
+storage-foyer = ["opendal/services-foyer"]
+storage-fs = ["opendal/services-fs"]
+storage-ftp = ["opendal/services-ftp"]
+storage-gcs = ["opendal/services-gcs"]
+storage-gdrive = ["opendal/services-gdrive"]
+storage-ghac = ["opendal/services-ghac"]
+storage-github = ["opendal/services-github"]
+storage-goosefs = ["opendal/services-goosefs"]
+storage-gridfs = ["opendal/services-gridfs"]
+storage-hdfs = ["opendal/services-hdfs"]
+storage-hdfs-native = ["opendal/services-hdfs-native"]
+storage-hf = ["opendal/services-hf"]
+storage-http = ["opendal/services-http"]
+storage-ipfs = ["opendal/services-ipfs"]
+storage-ipmfs = ["opendal/services-ipmfs"]
+storage-koofr = ["opendal/services-koofr"]
+storage-lakefs = ["opendal/services-lakefs"]
+storage-memcached = ["opendal/services-memcached"]
+storage-memory = ["opendal/services-memory"]
+storage-mini-moka = ["opendal/services-mini-moka"]
+storage-moka = ["opendal/services-moka"]
+storage-mongodb = ["opendal/services-mongodb"]
+storage-monoiofs = ["opendal/services-monoiofs"]
+storage-mysql = ["opendal/services-mysql"]
+storage-obs = ["opendal/services-obs"]
+storage-onedrive = ["opendal/services-onedrive"]
+storage-opfs = ["opendal/services-opfs"]
+storage-oss = ["opendal/services-oss"]
+storage-pcloud = ["opendal/services-pcloud"]
+storage-persy = ["opendal/services-persy"]
+storage-postgresql = ["opendal/services-postgresql"]
+storage-redb = ["opendal/services-redb"]
+storage-redis = ["opendal/services-redis"]
+storage-rocksdb = ["opendal/services-rocksdb"]
+storage-s3 = ["opendal/services-s3"]
+storage-seafile = ["opendal/services-seafile"]
+storage-sftp = ["opendal/services-sftp"]
+storage-sled = ["opendal/services-sled"]
+storage-sqlite = ["opendal/services-sqlite"]
+storage-surrealdb = ["opendal/services-surrealdb"]
+storage-swift = ["opendal/services-swift"]
+storage-tikv = ["opendal/services-tikv"]
+storage-tos = ["opendal/services-tos"]
+storage-upyun = ["opendal/services-upyun"]
+storage-vercel-artifacts = ["opendal/services-vercel-artifacts"]
+storage-vercel-blob = ["opendal/services-vercel-blob"]
+storage-webdav = ["opendal/services-webdav"]
+storage-webhdfs = ["opendal/services-webhdfs"]
+storage-yandex-disk = ["opendal/services-yandex-disk"]

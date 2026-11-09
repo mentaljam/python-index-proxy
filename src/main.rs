@@ -15,12 +15,14 @@ use crate::settings::Settings;
 // mod models;
 mod settings;
 mod state;
+mod storage;
 
 type AppState = State<state::State>;
 
 #[tokio::main]
 async fn main() {
-    // Reqwest and the S3 client enable different Rustls providers.
+    opendal::install_default();
+    // Install an explicit provider for the HTTP clients.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     tracing_subscriber::registry()

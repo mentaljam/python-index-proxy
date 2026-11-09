@@ -1,13 +1,13 @@
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{collections::HashMap, path::Path, pin::Pin, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use bytes::{Bytes, BytesMut};
-use futures::Stream;
+use futures::{Stream, TryStreamExt};
 use moka::future::Cache;
+use opendal::Operator;
 use quick_xml::{events::Event, reader::Reader as XmlReader};
 use redb::{Database, ReadableDatabase, Table, TableDefinition, WriteTransaction};
 use reqwest::Client;
-use s3::{Bucket, Region};
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use url::Url;
@@ -80,13 +80,9 @@ impl State {
         Ok(index)
     }
 
-    pub async fn get_file(
-        &self,
-        hash: String,
-        file: String,
-    ) -> anyhow::Result<File<impl Stream<Item = anyhow::Result<Bytes>> + use<>>> {
+    pub async fn get_file(&self, hash: String, file: String) -> anyhow::Result<File> {
         tracing::debug!("processing request for {file}");
-        let s3_path = format!("{}/{}/{hash}/{file}", &hash[0..2], &hash[2..4]);
+        let object_path = format!("{}/{}/{hash}/{file}", &hash[0..2], &hash[2..4]);
 
         let data = self.0.read().await;
         if let Some(rw_lock) = data.download_locks.get(&hash) {
@@ -94,13 +90,9 @@ impl State {
             let _ = rw_lock.read().await;
         }
 
-        if data.bucket.head_object(&s3_path).await.is_ok() {
+        if data.storage.stat(&object_path).await.is_ok() {
             tracing::debug!("serving cached {file}");
-            return data
-                .bucket
-                .presign_get(s3_path, 600, None)
-                .map_err(anyhow::Error::from)
-                .map(File::PresignedUrl);
+            return cached_file(&data.storage, &object_path).await;
         }
 
         let mut url = match data
@@ -148,8 +140,8 @@ impl State {
                 self.0
                     .read()
                     .await
-                    .bucket
-                    .put_object(&s3_path, &buf[..])
+                    .storage
+                    .write(&object_path, buf.clone())
                     .await?;
                 self.0.write().await.download_locks.remove(&hash);
                 return Ok(File::Bytes(buf));
@@ -162,64 +154,34 @@ impl State {
         let stream = async_stream::stream! {
             let _file_write_guard = file_lock.write().await;
             let data = data_ptr.read().await;
-            let mut part_number = 2u32;
-            let mut parts = Vec::new();
-            let mp_upload = data
-                .bucket
-                .initiate_multipart_upload(&s3_path, &content_type)
-                .await?;
+            let mut writer = data.storage.writer_with(&object_path)
+                .content_type(&content_type).chunk(CHUNK_SIZE).await?;
 
-            yield Ok(buf.clone());
-
-            match data
-                .bucket
-                .put_multipart_chunk(
-                    buf.into(),
-                    &s3_path,
-                    part_number,
-                    &mp_upload.upload_id,
-                    &content_type,
-                )
-                .await
-            {
-                Ok(part) => parts.push(part),
-                Err(err) => {
-                    tracing::error!("Failed to put multipart chunk #{part_number} to S3: {err}")
-                }
+            if let Err(err) = writer.write(buf.clone()).await {
+                let _ = writer.abort().await;
+                Err(err)?;
             }
+            yield Ok(buf);
 
-            part_number += 1;
-
-            while let Some(buf) = buffered_reader.chunk().await? {
-                yield Ok(buf.clone());
-
-                match data
-                    .bucket
-                    .put_multipart_chunk(
-                        buf.into(),
-                        &s3_path,
-                        part_number,
-                        &mp_upload.upload_id,
-                        &content_type,
-                    )
-                    .await
-                {
-                    Ok(part) => parts.push(part),
+            loop {
+                let next = match buffered_reader.chunk().await {
+                    Ok(next) => next,
                     Err(err) => {
-                        tracing::error!("Failed to put multipart chunk #{part_number} to S3: {err}")
+                        let _ = writer.abort().await;
+                        Err(err)?;
+                        unreachable!();
                     }
+                };
+                let Some(buf) = next else { break };
+                if let Err(err) = writer.write(buf.clone()).await {
+                    let _ = writer.abort().await;
+                    Err(err)?;
                 }
-
-                part_number += 1;
+                yield Ok(buf);
             }
-
-
-            if let Err(err) = data
-                .bucket
-                .complete_multipart_upload(&s3_path, &mp_upload.upload_id, parts)
-                .await
-            {
-                tracing::error!("Failed to save file to S3: {err}");
+            if let Err(err) = writer.close().await {
+                let _ = writer.abort().await;
+                Err(err)?;
             }
 
             // drop(file_write_guard);
@@ -227,7 +189,7 @@ impl State {
             data_ptr.write().await.download_locks.remove(&hash);
         };
 
-        Ok(File::Stream(stream))
+        Ok(File::Stream(Box::pin(stream)))
     }
 }
 
@@ -240,7 +202,7 @@ impl TryFrom<Settings> for State {
             db_path,
             index_cache,
             indices,
-            s3,
+            storage,
             ..
         } = settings;
 
@@ -251,14 +213,6 @@ impl TryFrom<Settings> for State {
             .max_capacity(index_cache.max_capacity.into())
             .build();
 
-        let region = match s3.endpoint {
-            Some(endpoint) => Region::Custom {
-                region: s3.region.to_string(),
-                endpoint,
-            },
-            None => s3.region,
-        };
-
         let indices_list = format_indices_list(&base_url, &indices);
 
         let indices = indices
@@ -266,7 +220,7 @@ impl TryFrom<Settings> for State {
             .map(|(slug, urls)| (slug, urls.into_iter().map(IndexUrlTemplate).collect()))
             .collect();
 
-        let bucket = Bucket::new(&s3.bucket, region.clone(), s3.credentials)?.with_path_style();
+        let storage = storage.operator()?;
 
         let data = StateData {
             base_url,
@@ -275,7 +229,7 @@ impl TryFrom<Settings> for State {
             index_cache,
             indices,
             indices_list,
-            bucket,
+            storage,
             download_locks: HashMap::new(),
         };
 
@@ -333,11 +287,33 @@ fn open_database(path: &Path) -> anyhow::Result<Database> {
     Ok(db)
 }
 
-pub enum File<S> {
+pub enum File {
     PresignedUrl(String),
     Bytes(Bytes),
-    Stream(S),
+    Stream(Pin<Box<dyn Stream<Item = anyhow::Result<Bytes>> + Send>>),
     None,
+}
+
+async fn cached_file(storage: &Operator, path: &str) -> anyhow::Result<File> {
+    if storage.info().capability().presign_read {
+        let request = storage.presign_read(path, Duration::from_secs(600)).await?;
+        // A redirect cannot supply arbitrary signed headers to the client.
+        if request.method() == http::Method::GET
+            && request
+                .header()
+                .keys()
+                .all(|name| name == http::header::HOST)
+        {
+            return Ok(File::PresignedUrl(request.uri().to_string()));
+        }
+    }
+    let stream = storage
+        .reader(path)
+        .await?
+        .into_bytes_stream(..)
+        .await?
+        .map_err(anyhow::Error::from);
+    Ok(File::Stream(Box::pin(stream)))
 }
 
 struct StateData {
@@ -347,7 +323,7 @@ struct StateData {
     index_cache: Cache<String, Bytes>,
     indices: HashMap<String, Vec<IndexUrlTemplate>>,
     indices_list: String,
-    bucket: Bucket,
+    storage: Operator,
     download_locks: HashMap<String, Arc<RwLock<()>>>,
 }
 
@@ -505,4 +481,70 @@ fn format_indices_list(base_url: &str, indices: &HashMap<String, Vec<String>>) -
     }
     list.push_str("\n</body>\n</html>");
     list
+}
+
+#[cfg(test)]
+mod storage_tests {
+    use super::*;
+    use futures::TryStreamExt;
+
+    #[tokio::test]
+    async fn filesystem_cache_hit_streams_exact_bytes_without_database_mapping() {
+        let root = std::env::temp_dir().join(format!(
+            "pipr-storage-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut config = opendal::services::FsConfig::default();
+        config.root = Some(root.to_str().unwrap().into());
+        let storage = crate::storage::Storage::Fs(config).operator().unwrap();
+        let path = "ab/cd/identifier/package.whl";
+        let mut writer = storage
+            .writer_with(path)
+            .content_type("application/octet-stream")
+            .chunk(CHUNK_SIZE)
+            .await
+            .unwrap();
+        writer.write(Bytes::from_static(b"cached ")).await.unwrap();
+        assert!(
+            storage.stat(path).await.is_err(),
+            "unfinished artifact must stay hidden"
+        );
+        writer
+            .write(Bytes::from_static(b"wheel bytes"))
+            .await
+            .unwrap();
+        writer.close().await.unwrap();
+        let File::Stream(stream) = cached_file(&storage, path).await.unwrap() else {
+            panic!("filesystem cache hits must stream")
+        };
+        let chunks: Vec<Bytes> = stream.try_collect().await.unwrap();
+        assert_eq!(chunks.concat(), b"cached wheel bytes");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(feature = "storage-s3")]
+    #[tokio::test]
+    async fn s3_cache_hit_presigns_existing_object_path() {
+        opendal::install_default();
+        let storage: crate::storage::Storage = toml::from_str(
+            "[s3]\nbucket = 'packages'\nregion = 'us-east-1'\nendpoint = 'https://objects.example.test'\naccess_key_id = 'test-key'\nsecret_access_key = 'test-secret'\ndisable_config_load = true\ndisable_ec2_metadata = true\n"
+        ).unwrap();
+        let storage = storage.operator().unwrap();
+        let File::PresignedUrl(url) = cached_file(&storage, "ab/cd/package.whl").await.unwrap()
+        else {
+            panic!("S3 cache hits must redirect when signature needs no extra headers")
+        };
+        let url = Url::parse(&url).unwrap();
+        assert_eq!(url.host_str(), Some("objects.example.test"));
+        assert_eq!(url.path(), "/packages/ab/cd/package.whl");
+        assert!(url.query_pairs().any(|(name, _)| name == "X-Amz-Signature"));
+        assert!(
+            url.query_pairs()
+                .any(|(name, value)| name == "X-Amz-Expires" && value == "600")
+        );
+    }
 }

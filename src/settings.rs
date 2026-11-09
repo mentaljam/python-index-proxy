@@ -1,37 +1,21 @@
 use std::{collections::HashMap, net::SocketAddr, path::PathBuf, time::Duration};
 
 use config::{Config, ConfigError, Environment, File};
-use s3::{Region, creds::Credentials};
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, Serialize)]
-#[serde(default)]
 pub struct Settings {
+    #[serde(default = "defaults::bind")]
     pub bind: SocketAddr,
-    #[serde(deserialize_with = "de::base_url")]
+    #[serde(default = "defaults::base_url", deserialize_with = "de::base_url")]
     pub base_url: String,
+    #[serde(default = "defaults::db_path")]
     pub db_path: PathBuf,
-    #[serde(deserialize_with = "de::indices")]
+    #[serde(default = "defaults::indices", deserialize_with = "de::indices")]
     pub indices: HashMap<String, Vec<String>>,
+    #[serde(default)]
     pub index_cache: Cache,
-    pub s3: S3,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            bind: "127.0.0.1:3000".parse().unwrap(),
-            base_url: "/".into(),
-            db_path: "python-index-proxy.redb".into(),
-            indices: [(
-                "default".into(),
-                vec!["https://pypi.org/simple/{package}/".into()],
-            )]
-            .into(),
-            index_cache: Cache::default(),
-            s3: S3::default(),
-        }
-    }
+    pub storage: crate::storage::Storage,
 }
 
 impl Settings {
@@ -50,13 +34,12 @@ impl Settings {
 
     pub fn template() -> Self {
         Self {
-            s3: S3 {
-                endpoint: Some(String::new()),
-                credentials: Credentials::new(Some(""), Some(""), Some(""), Some(""), Some(""))
-                    .unwrap(),
-                ..Default::default()
-            },
-            ..Default::default()
+            bind: defaults::bind(),
+            base_url: defaults::base_url(),
+            db_path: defaults::db_path(),
+            indices: defaults::indices(),
+            index_cache: Cache::default(),
+            storage: crate::storage::Storage::filesystem_template(),
         }
     }
 }
@@ -97,27 +80,6 @@ impl Default for MaxCacheCapacity {
 impl From<MaxCacheCapacity> for u64 {
     fn from(value: MaxCacheCapacity) -> Self {
         value.0
-    }
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(default)]
-pub struct S3 {
-    pub region: Region,
-    pub endpoint: Option<String>,
-    pub bucket: String,
-    pub credentials: Credentials,
-}
-
-impl Default for S3 {
-    fn default() -> Self {
-        Self {
-            region: Region::WaUsEast1,
-            endpoint: None,
-            bucket: env!("CARGO_PKG_NAME").into(),
-            credentials: Credentials::default()
-                .unwrap_or_else(|_| Credentials::anonymous().unwrap()),
-        }
     }
 }
 
@@ -164,5 +126,29 @@ a `{{package}}` placeholder: found invalid URL \"{url}\" for index \"{index}\"",
             }
         }
         Ok(indices)
+    }
+}
+
+mod defaults {
+    use super::*;
+
+    pub fn bind() -> SocketAddr {
+        "127.0.0.1:3000".parse().unwrap()
+    }
+
+    pub fn base_url() -> String {
+        "/".into()
+    }
+
+    pub fn db_path() -> PathBuf {
+        "python-index-proxy.redb".into()
+    }
+
+    pub fn indices() -> HashMap<String, Vec<String>> {
+        [(
+            "default".into(),
+            vec!["https://pypi.org/simple/{package}/".into()],
+        )]
+        .into()
     }
 }

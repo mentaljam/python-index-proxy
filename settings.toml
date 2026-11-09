@@ -5,10 +5,9 @@ default = [
 ]
 torch-cu111 = ["https://download.pytorch.org/whl/cu111/{package}/"]
 
-[s3]
+[storage.s3]
 endpoint = "http://127.0.0.1:9000"
 bucket = "python-index-proxy"
-
-[s3.credentials]
-access_key = "minioadmin"
-secret_key = "minioadmin"
+region = "us-east-1"
+access_key_id = "minioadmin"
+secret_access_key = "minioadmin"
