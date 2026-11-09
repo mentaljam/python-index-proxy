@@ -84,12 +84,17 @@ impl State {
         tracing::debug!("processing request for {file}");
         let object_path = format!("{}/{}/{hash}/{file}", &hash[0..2], &hash[2..4]);
 
-        let data = self.0.read().await;
-        if let Some(rw_lock) = data.download_locks.get(&hash) {
+        let download_lock = {
+            let data = self.0.read().await;
+            data.download_locks.get(&hash).cloned()
+        };
+        if let Some(rw_lock) = download_lock {
             tracing::debug!("already downloading {file}, waiting...");
+            // The active download needs the state write lock before releasing this lock.
             let _ = rw_lock.read().await;
         }
 
+        let data = self.0.read().await;
         if data.storage.stat(&object_path).await.is_ok() {
             tracing::debug!("serving cached {file}");
             return cached_file(&data.storage, &object_path).await;
@@ -487,6 +492,66 @@ fn format_indices_list(base_url: &str, indices: &HashMap<String, Vec<String>>) -
 mod storage_tests {
     use super::*;
     use futures::TryStreamExt;
+
+    #[tokio::test]
+    async fn waiting_download_allows_active_download_to_finish() {
+        let root = std::env::temp_dir().join(format!(
+            "pipr-download-lock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut settings = Settings::template();
+        settings.db_path = root.join("metadata.redb");
+        let mut config = opendal::services::FsConfig::default();
+        config.root = Some(root.join("artifacts").to_str().unwrap().into());
+        settings.storage = crate::storage::Storage::Fs(config);
+        let state = State::try_from(settings).unwrap();
+        let hash = "abcd0123456789";
+        let file_lock = Arc::new(RwLock::new(()));
+        let active_download = file_lock.write().await;
+        state
+            .0
+            .write()
+            .await
+            .download_locks
+            .insert(hash.into(), file_lock.clone());
+
+        let mut waiting_download = Box::pin(state.get_file(hash.into(), "package.whl".into()));
+        // Polling to Pending puts the request at the held file lock without sleeps.
+        assert!(futures::poll!(&mut waiting_download).is_pending());
+        let storage = state.0.read().await.storage.clone();
+        storage
+            .write(
+                "ab/cd/abcd0123456789/package.whl",
+                Bytes::from_static(b"finished artifact"),
+            )
+            .await
+            .unwrap();
+        // The active download must be able to clean up while retaining its file lock.
+        let mut data = tokio::time::timeout(Duration::from_secs(1), state.0.write())
+            .await
+            .expect("waiting request must not block active download cleanup");
+        data.download_locks.remove(hash);
+        drop(data);
+        drop(active_download);
+
+        let file = tokio::time::timeout(Duration::from_secs(1), &mut waiting_download)
+            .await
+            .expect("waiting request must resume after the active download")
+            .unwrap();
+        let File::Stream(stream) = file else {
+            panic!("filesystem cache hit must stream")
+        };
+        let chunks: Vec<Bytes> = stream.try_collect().await.unwrap();
+        assert_eq!(chunks.concat(), b"finished artifact");
+        drop(waiting_download);
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[tokio::test]
     async fn filesystem_cache_hit_streams_exact_bytes_without_database_mapping() {
