@@ -4,7 +4,7 @@ use bytes::{Bytes, BytesMut};
 use futures::Stream;
 use moka::future::Cache;
 use quick_xml::{events::Event, reader::Reader as XmlReader};
-use redb::{Database, Table, TableDefinition, WriteTransaction};
+use redb::{Database, ReadableDatabase, Table, TableDefinition, WriteTransaction};
 use reqwest::Client;
 use s3::{Bucket, Region};
 use sha2::{Digest, Sha256};
@@ -83,7 +83,7 @@ impl State {
         &self,
         hash: String,
         file: String,
-    ) -> anyhow::Result<File<impl Stream<Item = anyhow::Result<Bytes>>>> {
+    ) -> anyhow::Result<File<impl Stream<Item = anyhow::Result<Bytes>> + use<>>> {
         tracing::debug!("processing request for {file}");
         let s3_path = format!("{}/{}/{hash}/{file}", &hash[0..2], &hash[2..4]);
 
@@ -334,30 +334,31 @@ impl<'txn> DetailParser<'txn> {
 
     async fn parse_html(&mut self, package_url: &Url, content: Bytes) -> anyhow::Result<()> {
         let Self {
-            ref mut file_links,
-            ref mut link_count,
-            ref mut html,
-            ref mut buf,
-            ref anchor_start,
+            file_links,
+            link_count,
+            html,
+            buf,
+            anchor_start,
         } = self;
 
         let mut reader = XmlReader::from_reader(&*content);
-        reader.trim_text(true).check_end_names(false);
+        reader.config_mut().trim_text(true);
+        reader.config_mut().check_end_names = false;
         let mut in_a = false;
 
         loop {
             match reader.read_event_into_async(buf).await? {
-                Event::Start(e) if e.name().as_ref() == b"a" => {
+                Event::Start(e) if e.name().as_ref() == "a" => {
                     in_a = true;
                     if let Some(href) = e.try_get_attribute("href")? {
-                        let url = std::str::from_utf8(&href.value)?.split('#').next().unwrap();
+                        let url = href.value.split('#').next().unwrap();
                         if let Some(file) = url.rsplit('/').next() {
-                            let hash = Sha256::digest(&href.value);
-                            let hex = format!("{hash:x}");
+                            let hash = Sha256::digest(href.value.as_bytes());
+                            let hex = hex::encode(hash);
 
                             let attributes = e.attributes().filter(|a| {
                                 a.as_ref()
-                                    .map(|a| a.key.as_ref() != b"href")
+                                    .map(|a| a.key.as_ref() != "href")
                                     .unwrap_or(false)
                             });
 
@@ -369,9 +370,9 @@ impl<'txn> DetailParser<'txn> {
                             for attr in attributes {
                                 let attr = attr?;
                                 html.push(b' ');
-                                html.extend(attr.key.as_ref());
+                                html.extend(attr.key.as_ref().as_bytes());
                                 html.extend(br#"=""#);
-                                html.extend(attr.value.as_ref());
+                                html.extend(attr.value.as_bytes());
                                 html.push(b'"');
                             }
                             html.push(b'>');
@@ -382,12 +383,17 @@ impl<'txn> DetailParser<'txn> {
                         }
                     }
                 }
-                Event::End(e) if in_a && e.name().as_ref() == b"a" => {
+                Event::End(e) if in_a && e.name().as_ref() == "a" => {
                     in_a = false;
                     html.extend(b"</a><br/>\n");
                 }
                 Event::Text(text) if in_a => {
-                    html.extend(&*text);
+                    html.extend(text.as_bytes());
+                }
+                Event::GeneralRef(reference) if in_a => {
+                    html.push(b'&');
+                    html.extend(reference.as_bytes());
+                    html.push(b';');
                 }
                 Event::Eof => break,
                 _ => (),

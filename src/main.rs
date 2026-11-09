@@ -1,10 +1,10 @@
 use axum::{
+    Router,
     body::Body,
     extract::{Path, State},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
-    Router,
 };
 use state::File;
 use tokio::{net::TcpListener, signal};
@@ -20,6 +20,9 @@ type AppState = State<state::State>;
 
 #[tokio::main]
 async fn main() {
+    // Reqwest and the S3 client enable different Rustls providers.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -60,8 +63,8 @@ async fn serve() -> anyhow::Result<()> {
 fn get_router(base_url: &str) -> Router<state::State> {
     let router = Router::new()
         .route("/", get(list_indices))
-        .route("/:index/:package/", get(get_detail))
-        .route("/packages/:hash/:file", get(get_file));
+        .route("/{index}/{package}/", get(get_detail))
+        .route("/packages/{hash}/{file}", get(get_file));
 
     if base_url == "/" {
         router

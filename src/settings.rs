@@ -1,7 +1,7 @@
 use std::{collections::HashMap, net::SocketAddr, path::PathBuf, time::Duration};
 
 use config::{Config, ConfigError, Environment, File};
-use s3::{creds::Credentials, Region};
+use s3::{Region, creds::Credentials};
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize, Serialize)]
@@ -125,8 +125,8 @@ mod de {
     use std::collections::HashMap;
 
     use serde::{
-        de::{Deserializer, Error},
         Deserialize,
+        de::{Deserializer, Error},
     };
 
     pub fn base_url<'de, D>(deserializer: D) -> Result<String, D::Error>
