@@ -1,12 +1,11 @@
-use std::{collections::HashMap, path::Path, pin::Pin, sync::Arc, time::Duration};
+use std::{collections::HashMap, pin::Pin, sync::Arc, time::Duration};
 
-use anyhow::Context;
 use bytes::{Bytes, BytesMut};
 use futures::{Stream, TryStreamExt};
 use moka::future::Cache;
 use opendal::Operator;
+use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 use quick_xml::{events::Event, reader::Reader as XmlReader};
-use redb::{Database, ReadableDatabase, TableDefinition, WriteTransaction};
 use reqwest::Client;
 use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
@@ -14,7 +13,6 @@ use url::Url;
 
 use crate::settings::Settings;
 
-const FILE_LINK_TABLE: TableDefinition<&str, String> = TableDefinition::new("file_link");
 const CHUNK_SIZE: usize = 5 * 1024 * 1024;
 const CHUNK_BUFFER_SIZE: usize = CHUNK_SIZE + 512 * 1024;
 // const VND_PYPI_SIMPLE_V1_JSON: &str = "application/vnd.pypi.simple.v1+json";
@@ -32,53 +30,78 @@ impl State {
         index_slug: String,
         package: String,
     ) -> anyhow::Result<Option<Bytes>> {
+        Ok(self
+            .package_detail(&index_slug, &package, None)
+            .await?
+            .map(|detail| detail.html.clone()))
+    }
+
+    async fn package_detail(
+        &self,
+        index_slug: &str,
+        package: &str,
+        artifact_id: Option<&str>,
+    ) -> anyhow::Result<Option<Arc<PackageDetail>>> {
+        if !valid_filename(index_slug) || !valid_filename(package) {
+            return Ok(None);
+        }
         let (index_cache, http_client, base_url, url_templates) = {
             let data = self.0.read().await;
             (
                 data.index_cache.clone(),
                 data.http_client.clone(),
                 data.base_url.clone(),
-                data.indices.get(&index_slug).cloned(),
+                data.indices.get(index_slug).cloned(),
             )
         };
-        let cache_key = format!("{index_slug}/{package}");
-        let index = index_cache.get(&cache_key).await;
-        if index.is_some() {
-            return Ok(index);
+        let cache_key = format!("{}/{}", encode_segment(index_slug), encode_segment(package));
+        if let Some(detail) = index_cache.get(&cache_key).await
+            && artifact_id.is_none_or(|id| detail.files.contains_key(id))
+        {
+            return Ok(Some(detail));
         }
         let Some(url_templates) = url_templates else {
             return Ok(None);
         };
-
-        let mut parser = DetailParser::new(&base_url);
-        for url_template in url_templates {
-            let package_url = url_template.package_url(&package)?;
-            let response = http_client.get(package_url.clone()).send().await?;
+        let mut parser = DetailParser::new(&base_url, index_slug, package);
+        for template in url_templates {
+            let response = http_client
+                .get(template.package_url(package)?)
+                .send()
+                .await?;
             if response.status().is_success() {
-                let details = response.bytes().await?;
-                parser.parse_html(&package_url, details).await?;
+                let final_url = response.url().clone();
+                parser
+                    .parse_html(&final_url, response.bytes().await?)
+                    .await?;
             }
         }
-
-        {
-            let data = self.0.read().await;
-            let txn = data.db.begin_write()?;
-            parser.persist(&txn)?;
-            txn.commit()?;
+        let detail = parser.finalize().map(Arc::new);
+        if let Some(detail) = &detail {
+            index_cache.insert(cache_key, detail.clone()).await;
         }
-        let index = parser.finalize();
-        if let Some(index) = &index {
-            index_cache.insert(cache_key, index.clone()).await;
-        }
-        Ok(index)
+        Ok(detail)
     }
 
-    pub async fn get_file(&self, hash: String, file: String) -> anyhow::Result<File> {
+    pub async fn get_file(
+        &self,
+        index: String,
+        package: String,
+        hash: String,
+        file: String,
+    ) -> anyhow::Result<File> {
         if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Ok(File::None);
         }
+        if !valid_filename(&index)
+            || !valid_filename(&package)
+            || !valid_filename(&file)
+            || !self.0.read().await.indices.contains_key(&index)
+        {
+            return Ok(File::None);
+        }
         tracing::debug!("processing request for {file}");
-        let object_path = format!("{}/{}/{hash}/{file}", &hash[0..2], &hash[2..4]);
+        let object_path = artifact_path(&index, &package, &hash, &file);
 
         let download_lock = {
             let data = self.0.read().await;
@@ -96,21 +119,23 @@ impl State {
             return cached_file(&data.storage, &object_path).await;
         }
 
-        let mut url = match data
-            .db
-            .begin_read()?
-            .open_table(FILE_LINK_TABLE)?
-            .get(hash.as_str())?
-        {
-            Some(url) => url.value(),
-            None => return Ok(File::None),
+        let http_client = data.http_client.clone();
+        drop(data);
+        let Some(detail) = self.package_detail(&index, &package, Some(&hash)).await? else {
+            return Ok(File::None);
         };
-
-        if file.ends_with(".metadata") {
-            url.push_str(".metadata");
+        let Some(source) = detail.files.get(&hash) else {
+            return Ok(File::None);
+        };
+        let mut url = Url::parse(&source.url)?;
+        if file != source.filename {
+            if file != format!("{}.metadata", source.filename) {
+                return Ok(File::None);
+            }
+            url.set_path(&format!("{}.metadata", url.path()));
         }
 
-        let response = data.http_client.get(&url).send().await?;
+        let response = http_client.get(url.clone()).send().await?;
         if !response.status().is_success() {
             anyhow::bail!("Failed to get {url}")
         }
@@ -123,7 +148,6 @@ impl State {
             })
             .to_owned();
 
-        drop(data);
         let file_lock = self
             .0
             .write()
@@ -221,21 +245,18 @@ impl TryFrom<Settings> for State {
     fn try_from(settings: Settings) -> Result<Self, Self::Error> {
         let Settings {
             base_url,
-            db_path,
             index_cache,
             indices,
             storage,
             ..
         } = settings;
 
-        let db = open_database(&db_path)?;
-
         let index_cache = Cache::builder()
             .time_to_live(index_cache.ttl.into())
             .max_capacity(index_cache.max_capacity.into())
-            // Account for key and payload bytes, not allocator or cache overhead.
-            .weigher(|key: &String, value: &Bytes| {
-                u32::try_from(key.len().saturating_add(value.len())).unwrap_or(u32::MAX)
+            // Account for key, rendered HTML and source mappings, not allocator overhead.
+            .weigher(|key: &String, value: &Arc<PackageDetail>| {
+                u32::try_from(key.len().saturating_add(value.byte_len())).unwrap_or(u32::MAX)
             })
             .build();
 
@@ -250,7 +271,6 @@ impl TryFrom<Settings> for State {
 
         let data = StateData {
             base_url,
-            db,
             http_client: Client::new(),
             index_cache,
             indices,
@@ -261,56 +281,6 @@ impl TryFrom<Settings> for State {
 
         Ok(Self(Arc::new(data.into())))
     }
-}
-
-fn open_database(path: &Path) -> anyhow::Result<Database> {
-    match Database::create(path) {
-        Ok(db) => return Ok(db),
-        Err(redb::DatabaseError::UpgradeRequired(2)) => {}
-        Err(err) => return Err(err.into()),
-    }
-
-    // Keep the legacy database locked while backing it up and upgrading it.
-    let mut legacy = redb_legacy::Database::open(path)
-        .with_context(|| format!("Failed to open legacy database {}", path.display()))?;
-    let mut backup_path = path.as_os_str().to_owned();
-    backup_path.push(".v2.bak");
-    let backup_path = std::path::PathBuf::from(backup_path);
-
-    tracing::info!(database = %path.display(), backup = %backup_path.display(), "Backing up v2 database before migration");
-    let mut source = std::fs::File::open(path)?;
-    let mut backup = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&backup_path)
-        .with_context(|| {
-            format!(
-                "Failed to create database backup {}; existing backups are never overwritten",
-                backup_path.display()
-            )
-        })?;
-    backup.set_permissions(source.metadata()?.permissions())?;
-    std::io::copy(&mut source, &mut backup)
-        .with_context(|| format!("Failed to copy database to {}", backup_path.display()))?;
-    backup
-        .sync_all()
-        .with_context(|| format!("Failed to sync database backup {}", backup_path.display()))?;
-    drop(backup);
-    drop(source);
-
-    legacy.upgrade().with_context(|| {
-        format!(
-            "Failed to migrate database {}; backup: {}",
-            path.display(),
-            backup_path.display()
-        )
-    })?;
-    drop(legacy);
-
-    let db = Database::open(path)
-        .with_context(|| format!("Failed to open migrated database {}", path.display()))?;
-    tracing::info!(database = %path.display(), "Database migrated from v2 to v3");
-    Ok(db)
 }
 
 pub enum File {
@@ -344,9 +314,8 @@ async fn cached_file(storage: &Operator, path: &str) -> anyhow::Result<File> {
 
 struct StateData {
     base_url: String,
-    db: Database,
     http_client: Client,
-    index_cache: Cache<String, Bytes>,
+    index_cache: Cache<String, Arc<PackageDetail>>,
     indices: HashMap<String, Vec<IndexUrlTemplate>>,
     indices_list: String,
     storage: Operator,
@@ -358,12 +327,14 @@ struct IndexUrlTemplate(String);
 
 impl IndexUrlTemplate {
     fn package_url(&self, package: &str) -> Result<Url, url::ParseError> {
-        self.0.replace("{package}", package).parse()
+        self.0
+            .replace("{package}", &encode_segment(package))
+            .parse()
     }
 }
 
 struct DetailParser {
-    file_links: Vec<(String, String)>,
+    file_links: HashMap<String, ArtifactSource>,
     link_count: usize,
     html: Vec<u8>,
     buf: Vec<u8>,
@@ -371,28 +342,20 @@ struct DetailParser {
 }
 
 impl DetailParser {
-    fn new(base_url: &str) -> Self {
+    fn new(base_url: &str, index: &str, package: &str) -> Self {
         Self {
-            file_links: Vec::new(),
+            file_links: HashMap::new(),
             link_count: 0,
             html: Vec::from(b"<!DOCTYPE html>\n<html>\n<body>\n"),
             buf: Vec::new(),
-            anchor_start: format!(r#"<a href="{}packages/"#, base_url),
+            anchor_start: format!(
+                r#"<a href="{}packages/{}/{}/"#,
+                base_url,
+                encode_segment(index),
+                encode_segment(package)
+            ),
         }
     }
-
-    fn persist(&self, txn: &WriteTransaction) -> anyhow::Result<()> {
-        let mut table = txn.open_table(FILE_LINK_TABLE)?;
-        for (hash, url) in &self.file_links {
-            table.insert(hash.as_str(), url)?;
-        }
-        Ok(())
-    }
-
-    // async fn parse_json(&mut self, package_url: &Url, content: Bytes) -> anyhow::Result<()> {
-    //     let detail: Detail = serde_json::from_slice(&content)?;
-    //     Ok(())
-    // }
 
     async fn parse_html(&mut self, package_url: &Url, content: Bytes) -> anyhow::Result<()> {
         let Self {
@@ -413,16 +376,18 @@ impl DetailParser {
                 Event::Start(e) if e.name().as_ref() == "a" => {
                     in_a = true;
                     if let Some(href) = e.try_get_attribute("href")? {
-                        let (url, fragment) = href
-                            .value
-                            .split_once('#')
-                            .map_or((href.value.as_ref(), None), |(url, fragment)| {
-                                (url, Some(fragment))
-                            });
-                        if let Some(file) = url.rsplit('/').next() {
-                            let hash = Sha256::digest(href.value.as_bytes());
-                            let hex = hex::encode(hash);
-
+                        let href_value =
+                            href.normalized_value(quick_xml::XmlVersion::Implicit1_0)?;
+                        let mut source_url = package_url.join(&href_value)?;
+                        let hex = hex::encode(Sha256::digest(source_url.as_str().as_bytes()));
+                        let fragment = source_url.fragment().map(str::to_owned);
+                        source_url.set_fragment(None);
+                        let file = source_url
+                            .path_segments()
+                            .and_then(|mut parts| parts.next_back())
+                            .unwrap_or("");
+                        let filename = percent_decode_str(file).decode_utf8()?.into_owned();
+                        if valid_filename(&filename) {
                             let attributes = e.attributes().filter(|a| {
                                 a.as_ref()
                                     .map(|a| a.key.as_ref() != "href")
@@ -432,10 +397,10 @@ impl DetailParser {
                             html.extend(anchor_start.as_bytes());
                             html.extend(hex.as_bytes());
                             html.push(b'/');
-                            html.extend(file.as_bytes());
+                            html.extend(encode_segment(&filename).as_bytes());
                             if let Some(fragment) = fragment {
                                 html.push(b'#');
-                                html.extend(fragment.as_bytes());
+                                html.extend(quick_xml::escape::escape(&fragment).as_bytes());
                             }
                             html.push(b'"');
                             for attr in attributes {
@@ -448,8 +413,13 @@ impl DetailParser {
                             }
                             html.push(b'>');
 
-                            let url = make_absolute(package_url, url)?;
-                            file_links.push((hex, url));
+                            file_links.insert(
+                                hex,
+                                ArtifactSource {
+                                    url: source_url.to_string(),
+                                    filename,
+                                },
+                            );
                             *link_count += 1;
                         }
                     }
@@ -475,15 +445,19 @@ impl DetailParser {
         Ok(())
     }
 
-    fn finalize(self) -> Option<Bytes> {
+    fn finalize(self) -> Option<PackageDetail> {
         let Self {
             mut html,
             link_count,
+            file_links,
             ..
         } = self;
         if link_count > 0 {
             html.extend(b"</body>\n</html>");
-            Some(html.into())
+            Some(PackageDetail {
+                html: html.into(),
+                files: file_links,
+            })
         } else {
             None
         }
@@ -509,13 +483,43 @@ impl BufferedResponseReader {
     }
 }
 
-fn make_absolute(package_url: &Url, url: &str) -> anyhow::Result<String> {
-    let url = if Url::parse(url).is_ok() {
-        url.to_owned()
-    } else {
-        package_url.join(url)?.to_string()
-    };
-    Ok(url)
+fn encode_segment(value: &str) -> String {
+    utf8_percent_encode(value, NON_ALPHANUMERIC).to_string()
+}
+
+fn valid_filename(value: &str) -> bool {
+    !value.is_empty() && value != "." && value != ".." && !value.contains(['/', '\\', '\0'])
+}
+
+fn artifact_path(index: &str, package: &str, hash: &str, file: &str) -> String {
+    format!(
+        "{}/{}/{}/{}/{hash}/{}",
+        encode_segment(index),
+        encode_segment(package),
+        &hash[..2],
+        &hash[2..4],
+        encode_segment(file)
+    )
+}
+
+struct ArtifactSource {
+    url: String,
+    filename: String,
+}
+struct PackageDetail {
+    html: Bytes,
+    files: HashMap<String, ArtifactSource>,
+}
+impl PackageDetail {
+    fn byte_len(&self) -> usize {
+        self.files
+            .iter()
+            .fold(self.html.len(), |size, (hash, source)| {
+                size.saturating_add(hash.len())
+                    .saturating_add(source.url.len())
+                    .saturating_add(source.filename.len())
+            })
+    }
 }
 
 fn format_indices_list(base_url: &str, indices: &HashMap<String, Vec<String>>) -> String {
@@ -531,7 +535,107 @@ fn format_indices_list(base_url: &str, indices: &HashMap<String, Vec<String>>) -
 mod storage_tests {
     use super::*;
     use futures::TryStreamExt;
-    use redb::ReadableTable;
+
+    fn page(html: &'static [u8]) -> Arc<PackageDetail> {
+        Arc::new(PackageDetail {
+            html: Bytes::from_static(html),
+            files: HashMap::new(),
+        })
+    }
+
+    #[tokio::test]
+    async fn cold_replica_recovers_context_links_and_cached_artifacts_survive_upstream_loss() {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            use axum::{routing::get, extract::Path, http::StatusCode, response::IntoResponse};
+            let index_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let app = axum::Router::new()
+                .route("/simple/{package}/", get({
+                    let count = index_requests.clone();
+                    move |Path(package): Path<String>| {
+                        let count = count.clone();
+                        async move {
+                            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            if package != "pkg" { return StatusCode::NOT_FOUND.into_response(); }
+                            "<a href='../../files/pkg%2Bcpu.whl?download=1&amp;x=2#sha256=abc'>pkg+cpu.whl</a>".into_response()
+                        }
+                    }
+                }))
+                .route("/files/{file}", get(|Path(file): Path<String>, uri: axum::http::Uri| async move {
+                    if uri.query() != Some("download=1&x=2") { return StatusCode::BAD_REQUEST.into_response(); }
+                    match file.as_str() {
+                        "pkg+cpu.whl" => "wheel bytes".into_response(),
+                        "pkg+cpu.whl.metadata" => "metadata bytes".into_response(),
+                        _ => StatusCode::NOT_FOUND.into_response(),
+                    }
+                }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let upstream = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let root = std::env::temp_dir().join(format!("pipr-context-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+            let make_state = |capacity: &str| {
+                let mut settings = Settings::template();
+                settings.indices = [("default".into(), vec![format!("{endpoint}/simple/{{package}}/")])].into();
+                // Even an entry too large for cache admission must work for the current request.
+                settings.index_cache = toml::from_str(&format!("max_capacity = '{capacity}'")).unwrap();
+                let mut config = opendal::services::FsConfig::default();
+                config.root = Some(root.to_str().unwrap().into());
+                settings.storage = crate::storage::Storage::Fs(config);
+                State::try_from(settings).unwrap()
+            };
+            let first = make_state("1 B");
+            let html = first.get_detail("default".into(), "pkg".into()).await.unwrap().unwrap();
+            let html = std::str::from_utf8(&html).unwrap();
+            let href = html.split("href=\"").nth(1).unwrap().split('"').next().unwrap();
+            assert!(href.starts_with("/packages/default/pkg/"));
+            assert!(href.ends_with("/pkg%2Bcpu%2Ewhl#sha256=abc"));
+            let path = href.split('#').next().unwrap().to_owned();
+            let id = path.split('/').nth(4).unwrap().to_owned();
+            drop(first);
+            let second = make_state("1 B");
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let proxy_endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let router = crate::get_router("/").with_state(second.clone());
+            let proxy = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+            let client = reqwest::Client::new();
+            let response = client.get(format!("{proxy_endpoint}{path}")).send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.bytes().await.unwrap().as_ref(), b"wheel bytes");
+            assert_eq!(index_requests.load(std::sync::atomic::Ordering::SeqCst), 2);
+            // A still-live page from another replica can predate this artifact.
+            let stale = make_state("1 MiB");
+            let stale_detail = Arc::new(PackageDetail {
+                html: Bytes::from_static(b"old page"),
+                files: [("f".repeat(64), ArtifactSource { url: format!("{endpoint}/files/old.whl"), filename: "old.whl".into() })].into(),
+            });
+            stale.0.read().await.index_cache.insert("default/pkg".into(), stale_detail).await;
+            let File::Bytes(bytes) = stale.get_file("default".into(), "pkg".into(), id.clone(), "pkg+cpu.whl.metadata".into()).await.unwrap() else { panic!("stale page must refresh for an unknown artifact ID"); };
+            assert_eq!(bytes.as_ref(), b"metadata bytes");
+            assert_eq!(index_requests.load(std::sync::atomic::Ordering::SeqCst), 3);
+            drop(stale);
+            let metadata = client.get(format!("{proxy_endpoint}{path}.metadata")).send().await.unwrap();
+            assert_eq!(metadata.status(), StatusCode::OK);
+            assert_eq!(metadata.bytes().await.unwrap().as_ref(), b"metadata bytes");
+            for wrong_path in [
+                format!("/packages/default/pkg/{id}/wrong.whl"),
+                format!("/packages/default/other/{id}/pkg%2Bcpu%2Ewhl"),
+                format!("/packages/unknown/pkg/{id}/pkg%2Bcpu%2Ewhl"),
+                format!("/packages/default/pkg/{}/pkg%2Bcpu%2Ewhl", "0".repeat(64)),
+                format!("/packages/{id}/pkg%2Bcpu%2Ewhl"),
+            ] {
+                assert_eq!(client.get(format!("{proxy_endpoint}{wrong_path}")).send().await.unwrap().status(), StatusCode::NOT_FOUND, "{wrong_path}");
+            }
+            upstream.abort();
+            let _ = upstream.await;
+            let third = make_state("1 B");
+            let File::Stream(stream) = third.get_file("default".into(), "pkg".into(), id, "pkg+cpu.whl".into()).await.unwrap() else { panic!("fresh replica must serve storage hit"); };
+            assert_eq!(stream.try_collect::<Vec<_>>().await.unwrap().concat(), b"wheel bytes");
+            proxy.abort();
+            let _ = proxy.await;
+            drop(second);
+            drop(third);
+            std::fs::remove_dir_all(root).unwrap();
+        }).await.expect("context recovery must complete");
+    }
 
     #[tokio::test]
     async fn slow_index_fetch_does_not_block_unrelated_requests() {
@@ -573,7 +677,6 @@ mod storage_tests {
             ));
             std::fs::create_dir_all(&root).unwrap();
             let mut settings = Settings::template();
-            settings.db_path = root.join("metadata.redb");
             settings.indices =
                 [("default".into(), vec![format!("{endpoint}/{{package}}/")])].into();
             let mut config = opendal::services::FsConfig::default();
@@ -589,14 +692,6 @@ mod storage_tests {
                 .await
                 .expect("slow upstream body must not block unrelated state reads");
             assert!(indices.contains("default"));
-            {
-                let data = state.0.read().await;
-                let txn = data
-                    .db
-                    .try_begin_write()
-                    .expect("slow upstream body must not retain a database write transaction");
-                drop(txn);
-            }
             let fast = tokio::time::timeout(
                 Duration::from_secs(1),
                 state.get_detail("default".into(), "fast".into()),
@@ -605,18 +700,27 @@ mod storage_tests {
             .expect("slow upstream body must not hold the database write transaction")
             .unwrap()
             .unwrap();
-            assert!(std::str::from_utf8(&fast).unwrap().contains("/fast.whl\""));
+            assert!(
+                std::str::from_utf8(&fast)
+                    .unwrap()
+                    .contains("/fast%2Ewhl\"")
+            );
             release_body.notify_one();
             let slow = slow.await.unwrap().unwrap().unwrap();
-            assert!(std::str::from_utf8(&slow).unwrap().contains("/slow.whl\""));
-            let data = state.0.read().await;
-            let txn = data.db.begin_read().unwrap();
-            let table = txn.open_table(FILE_LINK_TABLE).unwrap();
-            let mut urls: Vec<_> = table
-                .iter()
-                .unwrap()
-                .map(|row| row.unwrap().1.value())
-                .collect();
+            assert!(
+                std::str::from_utf8(&slow)
+                    .unwrap()
+                    .contains("/slow%2Ewhl\"")
+            );
+            let mut urls = Vec::new();
+            for package in ["fast", "slow"] {
+                let detail = state
+                    .package_detail("default", package, None)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                urls.extend(detail.files.values().map(|source| source.url.clone()));
+            }
             urls.sort();
             assert_eq!(
                 urls,
@@ -625,9 +729,6 @@ mod storage_tests {
                     format!("{endpoint}/slow/slow.whl")
                 ]
             );
-            drop(table);
-            drop(txn);
-            drop(data);
             upstream.abort();
             drop(state);
             std::fs::remove_dir_all(root).unwrap();
@@ -648,7 +749,6 @@ mod storage_tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let mut settings = Settings::template();
-        settings.db_path = root.join("metadata.redb");
         settings.index_cache = toml::from_str("max_capacity = '12 B'").unwrap();
         let mut config = opendal::services::FsConfig::default();
         config.root = Some(root.join("artifacts").to_str().unwrap().into());
@@ -657,19 +757,14 @@ mod storage_tests {
         let cache = state.0.read().await.index_cache.clone();
 
         // Four UTF-8 key bytes and eight payload bytes exactly fill the budget.
-        cache
-            .insert("é/x".into(), Bytes::from_static(b"12345678"))
-            .await;
+        cache.insert("é/x".into(), page(b"12345678")).await;
         cache.run_pending_tasks().await;
         assert_eq!(cache.weighted_size(), 12);
-        assert_eq!(cache.get("é/x").await.as_deref(), Some(&b"12345678"[..]));
+        assert_eq!(cache.get("é/x").await.unwrap().html.as_ref(), b"12345678");
         cache.invalidate_all();
         cache.run_pending_tasks().await;
 
-        for (key, value) in [
-            ("key", Bytes::from_static(b"1234567890")),
-            ("long-cache-key", Bytes::new()),
-        ] {
+        for (key, value) in [("key", page(b"1234567890")), ("long-cache-key", page(b""))] {
             cache.insert(key.into(), value).await;
             cache.run_pending_tasks().await;
             assert!(
@@ -678,15 +773,29 @@ mod storage_tests {
             );
         }
 
+        let mappings_only = Arc::new(PackageDetail {
+            html: Bytes::new(),
+            files: [(
+                "abc".into(),
+                ArtifactSource {
+                    url: "1234".into(),
+                    filename: "12345".into(),
+                },
+            )]
+            .into(),
+        });
+        cache.insert("x".into(), mappings_only).await;
+        cache.run_pending_tasks().await;
+        assert!(
+            cache.get("x").await.is_none(),
+            "mapping IDs, URLs and filenames must share the byte budget"
+        );
+
         // Each entry fits separately, but the pair must not remain together.
-        cache
-            .insert("a".into(), Bytes::from_static(b"12345678"))
-            .await;
+        cache.insert("a".into(), page(b"12345678")).await;
         cache.run_pending_tasks().await;
         assert!(cache.get("a").await.is_some());
-        cache
-            .insert("b".into(), Bytes::from_static(b"12345678"))
-            .await;
+        cache.insert("b".into(), page(b"12345678")).await;
         cache.run_pending_tasks().await;
         assert_eq!(cache.entry_count(), 1);
         assert_eq!(cache.weighted_size(), 9);
@@ -697,83 +806,43 @@ mod storage_tests {
     }
 
     #[tokio::test]
-    async fn rewritten_file_links_preserve_fragments_without_changing_fetch_urls() {
-        let root = std::env::temp_dir().join(format!(
-            "pipr-link-fragments-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let db = Database::create(root.join("metadata.redb")).unwrap();
-        let package_url = Url::parse("https://index.example.test/simple/package/").unwrap();
-        let cases = [
-            (
-                "https://files.example.test/package.whl#sha256=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-                "package.whl#sha256=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-                "https://files.example.test/package.whl",
-                "6a16a8955b2babddb0c3ad773fc7a6add3f0b2689d00db155a068757728981f8",
-            ),
-            (
-                "../../files/package.tar.gz#sha256=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-                "package.tar.gz#sha256=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-                "https://index.example.test/files/package.tar.gz",
-                "07bdb75e783010a2edc6fd45fe244662ecba7e483d2ca856053bbe2482c728a5",
-            ),
-            (
-                "package.zip",
-                "package.zip",
-                "https://index.example.test/simple/package/package.zip",
-                "325f0f32c85c47a2de246674622845902200ac65e955be08942b31496c5e7ae1",
-            ),
-            (
-                "package.zip#custom=value#extra",
-                "package.zip#custom=value#extra",
-                "https://index.example.test/simple/package/package.zip",
-                "c30b441a46793feb524598937ee624b7c1d69b3a5beef092d1ea859d7925b5ab",
-            ),
-        ];
-        for (href, expected_file, expected_upstream, expected_identifier) in cases {
-            let txn = db.begin_write().unwrap();
-            let mut parser = DetailParser::new("/proxy/");
-            parser
-                .parse_html(
-                    &package_url,
-                    format!(r#"<a href="{href}">package</a>"#).into(),
-                )
-                .await
-                .unwrap();
-            parser.persist(&txn).unwrap();
-            let html = String::from_utf8(parser.finalize().unwrap().to_vec()).unwrap();
-            let rewritten = html
-                .split("href=\"")
-                .nth(1)
-                .unwrap()
-                .split('"')
-                .next()
-                .unwrap();
-            let (identifier, file) = rewritten
-                .strip_prefix("/proxy/packages/")
-                .unwrap()
-                .split_once('/')
-                .unwrap();
-            assert_eq!(identifier, expected_identifier);
-            assert_eq!(file, expected_file);
-            assert_eq!(
-                txn.open_table(FILE_LINK_TABLE)
-                    .unwrap()
-                    .get(identifier)
-                    .unwrap()
-                    .unwrap()
-                    .value(),
-                expected_upstream
-            );
-            txn.commit().unwrap();
-        }
-        drop(db);
-        std::fs::remove_dir_all(root).unwrap();
+    async fn rewritten_file_links_preserve_fragments_and_resolve_sources() {
+        let base = Url::parse("https://index.example.test/simple/pkg/").unwrap();
+        let mut parser = DetailParser::new("/proxy/", "default", "pkg");
+        parser.parse_html(&base, Bytes::from_static(b"<a href='../../files/pkg.whl?download=1&amp;x=2#sha256=abc'>pkg.whl</a><a href='plain.zip'>plain.zip</a>")).await.unwrap();
+        let detail = parser.finalize().unwrap();
+        let html = std::str::from_utf8(&detail.html).unwrap();
+        assert!(html.contains("/proxy/packages/default/pkg/"));
+        assert!(html.contains("/pkg%2Ewhl#sha256=abc\""));
+        assert!(html.contains("/plain%2Ezip\""));
+        let source = detail
+            .files
+            .values()
+            .find(|source| source.filename == "pkg.whl")
+            .unwrap();
+        assert_eq!(
+            source.url,
+            "https://index.example.test/files/pkg.whl?download=1&x=2"
+        );
+        let mut other = DetailParser::new("/", "default", "pkg");
+        other
+            .parse_html(
+                &Url::parse("https://other.example/simple/pkg/").unwrap(),
+                Bytes::from_static(b"<a href='plain.zip'>plain.zip</a>"),
+            )
+            .await
+            .unwrap();
+        let other = other.finalize().unwrap();
+        let first_id = detail
+            .files
+            .iter()
+            .find(|(_, source)| source.filename == "plain.zip")
+            .unwrap()
+            .0;
+        assert!(
+            !other.files.contains_key(first_id),
+            "relative links on different hosts must not collide"
+        );
     }
 
     #[tokio::test]
@@ -788,7 +857,6 @@ mod storage_tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let mut settings = Settings::template();
-        settings.db_path = root.join("metadata.redb");
         let mut config = opendal::services::FsConfig::default();
         config.root = Some(root.join("artifacts").to_str().unwrap().into());
         settings.storage = crate::storage::Storage::Fs(config);
@@ -797,7 +865,7 @@ mod storage_tests {
         let nonhex = "g".repeat(64);
         storage
             .write(
-                format!("gg/gg/{nonhex}/package.whl").as_str(),
+                format!("default/package/gg/gg/{nonhex}/package%2Ewhl").as_str(),
                 "invalid-key artifact",
             )
             .await
@@ -817,7 +885,12 @@ mod storage_tests {
             assert!(
                 matches!(
                     state
-                        .get_file(hash.clone(), "package.whl".into())
+                        .get_file(
+                            "default".into(),
+                            "package".into(),
+                            hash.clone(),
+                            "package.whl".into()
+                        )
                         .await
                         .unwrap(),
                     File::None
@@ -829,13 +902,18 @@ mod storage_tests {
         let hash = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
         storage
             .write(
-                format!("ab/cd/{hash}/package.whl").as_str(),
+                format!("default/package/ab/cd/{hash}/package%2Ewhl").as_str(),
                 "valid artifact",
             )
             .await
             .unwrap();
         let File::Stream(stream) = state
-            .get_file(hash.into(), "package.whl".into())
+            .get_file(
+                "default".into(),
+                "package".into(),
+                hash.into(),
+                "package.whl".into(),
+            )
             .await
             .unwrap()
         else {
@@ -854,7 +932,7 @@ mod storage_tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/package.whl", listener.local_addr().unwrap());
+        let url = format!("http://{}/package%2Ewhl", listener.local_addr().unwrap());
         let upstream = tokio::spawn(async move {
             loop {
                 let (mut socket, _) = listener.accept().await.unwrap();
@@ -883,23 +961,28 @@ mod storage_tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let mut settings = Settings::template();
-        settings.db_path = root.join("metadata.redb");
         let mut config = opendal::services::FsConfig::default();
         config.root = Some(root.join("artifacts").to_str().unwrap().into());
         settings.storage = crate::storage::Storage::Fs(config);
         let state = State::try_from(settings).unwrap();
-        {
-            let data = state.0.read().await;
-            let txn = data.db.begin_write().unwrap();
-            txn.open_table(FILE_LINK_TABLE)
-                .unwrap()
-                .insert(
-                    "abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab",
+        let detail = Arc::new(PackageDetail {
+            html: Bytes::new(),
+            files: [(
+                "abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab".into(),
+                ArtifactSource {
                     url,
-                )
-                .unwrap();
-            txn.commit().unwrap();
-        }
+                    filename: "package.whl".into(),
+                },
+            )]
+            .into(),
+        });
+        state
+            .0
+            .read()
+            .await
+            .index_cache
+            .insert("default/package".into(), detail)
+            .await;
         (state, root, upstream)
     }
 
@@ -909,7 +992,7 @@ mod storage_tests {
             let body = Bytes::from(vec![42; CHUNK_SIZE * 2]);
             let (state, root, upstream) = failed_download_fixture(body.clone(), false).await;
             let File::Stream(mut stream) = state
-                .get_file("abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab".into(), "package.whl".into())
+                .get_file("default".into(), "package".into(), "abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab".into(), "package.whl".into())
                 .await
                 .unwrap()
             else {
@@ -917,7 +1000,7 @@ mod storage_tests {
             };
             // Start the writer, then prevent its final atomic rename from succeeding.
             assert!(!stream.try_next().await.unwrap().unwrap().is_empty());
-            let object = root.join("artifacts/ab/cd/abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab/package.whl");
+            let object = root.join("artifacts/default/package/ab/cd/abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab/package%2Ewhl");
             std::fs::create_dir_all(&object).unwrap();
             assert!(stream.try_collect::<Vec<_>>().await.is_err());
             assert!(state.0.read().await.download_locks.is_empty());
@@ -930,7 +1013,7 @@ mod storage_tests {
             );
             std::fs::remove_dir(&object).unwrap();
             let File::Stream(stream) = state
-                .get_file("abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab".into(), "package.whl".into())
+                .get_file("default".into(), "package".into(), "abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab".into(), "package.whl".into())
                 .await
                 .unwrap()
             else {
@@ -956,7 +1039,7 @@ mod storage_tests {
                 let (state, root, upstream) =
                     failed_download_fixture(Bytes::from(vec![42; size]), true).await;
                 match state
-                    .get_file("abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab".into(), "package.whl".into())
+                    .get_file("default".into(), "package".into(), "abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab".into(), "package.whl".into())
                     .await
                 {
                     Err(_) if size < CHUNK_SIZE => {}
@@ -968,7 +1051,7 @@ mod storage_tests {
                 assert!(state.0.read().await.download_locks.is_empty());
                 assert!(
                     !root
-                        .join("artifacts/ab/cd/abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab/package.whl")
+                        .join("artifacts/default/package/ab/cd/abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab/package%2Ewhl")
                         .exists()
                 );
                 assert_eq!(
@@ -998,7 +1081,6 @@ mod storage_tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let mut settings = Settings::template();
-        settings.db_path = root.join("metadata.redb");
         let mut config = opendal::services::FsConfig::default();
         config.root = Some(root.join("artifacts").to_str().unwrap().into());
         settings.storage = crate::storage::Storage::Fs(config);
@@ -1013,13 +1095,18 @@ mod storage_tests {
             .download_locks
             .insert(hash.into(), file_lock.clone());
 
-        let mut waiting_download = Box::pin(state.get_file(hash.into(), "package.whl".into()));
+        let mut waiting_download = Box::pin(state.get_file(
+            "default".into(),
+            "package".into(),
+            hash.into(),
+            "package.whl".into(),
+        ));
         // Polling to Pending puts the request at the held file lock without sleeps.
         assert!(futures::poll!(&mut waiting_download).is_pending());
         let storage = state.0.read().await.storage.clone();
         storage
             .write(
-                "ab/cd/abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab/package.whl",
+                "default/package/ab/cd/abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab/package%2Ewhl",
                 Bytes::from_static(b"finished artifact"),
             )
             .await
@@ -1059,7 +1146,7 @@ mod storage_tests {
         let mut config = opendal::services::FsConfig::default();
         config.root = Some(root.to_str().unwrap().into());
         let storage = crate::storage::Storage::Fs(config).operator().unwrap();
-        let path = "ab/cd/identifier/package.whl";
+        let path = "default/package/ab/cd/identifier/package%2Ewhl";
         let mut writer = storage
             .writer_with(path)
             .content_type("application/octet-stream")

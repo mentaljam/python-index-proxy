@@ -20,9 +20,8 @@ http = "*"
 humantime-serde = "^1.1"
 moka = { version = "^0.12", features = ["future"] }
 opendal = { version = "=0.58.2", default-features = false, features = ["executors-tokio", "http-transport-reqwest-rustls"] }
+percent-encoding = "^2.3"
 quick-xml = { version = "^0.42", features = ["async-tokio"] }
-redb = "^4.5"
-redb_legacy = { package = "redb", version = "~2.6" }
 reqwest = { version = "^0.13", features = [
     "brotli",
     "charset",

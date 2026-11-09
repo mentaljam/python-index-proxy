@@ -67,7 +67,7 @@ fn get_router(base_url: &str) -> Router<state::State> {
     let router = Router::new()
         .route("/", get(list_indices))
         .route("/{index}/{package}/", get(get_detail))
-        .route("/packages/{hash}/{file}", get(get_file));
+        .route("/packages/{index}/{package}/{hash}/{file}", get(get_file));
 
     if base_url == "/" {
         router
@@ -126,8 +126,11 @@ async fn get_detail(
     }
 }
 
-async fn get_file(State(state): AppState, Path((hash, file)): Path<(String, String)>) -> Response {
-    match state.get_file(hash, file).await {
+async fn get_file(
+    State(state): AppState,
+    Path((index, package, hash, file)): Path<(String, String, String, String)>,
+) -> Response {
+    match state.get_file(index, package, hash, file).await {
         Ok(File::PresignedUrl(url)) => {
             (StatusCode::TEMPORARY_REDIRECT, [(header::LOCATION, url)]).into_response()
         }

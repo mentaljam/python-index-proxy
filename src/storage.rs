@@ -148,10 +148,6 @@ mod tests {
         assert_eq!(settings.bind.to_string(), "127.0.0.1:3000");
         assert_eq!(settings.base_url, "/");
         assert_eq!(
-            settings.db_path,
-            std::path::PathBuf::from("python-index-proxy.redb")
-        );
-        assert_eq!(
             settings.indices["default"],
             ["https://pypi.org/simple/{package}/"]
         );

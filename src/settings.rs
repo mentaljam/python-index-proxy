@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, time::Duration};
 
 use config::{Config, ConfigError, Environment, File};
 use serde::{Deserialize, Serialize};
@@ -9,8 +9,6 @@ pub struct Settings {
     pub bind: SocketAddr,
     #[serde(default = "defaults::base_url", deserialize_with = "de::base_url")]
     pub base_url: String,
-    #[serde(default = "defaults::db_path")]
-    pub db_path: PathBuf,
     #[serde(default = "defaults::indices", deserialize_with = "de::indices")]
     pub indices: HashMap<String, Vec<String>>,
     #[serde(default)]
@@ -36,7 +34,6 @@ impl Settings {
         Self {
             bind: defaults::bind(),
             base_url: defaults::base_url(),
-            db_path: defaults::db_path(),
             indices: defaults::indices(),
             index_cache: Cache::default(),
             storage: crate::storage::Storage::filesystem_template(),
@@ -138,10 +135,6 @@ mod defaults {
 
     pub fn base_url() -> String {
         "/".into()
-    }
-
-    pub fn db_path() -> PathBuf {
-        "python-index-proxy.redb".into()
     }
 
     pub fn indices() -> HashMap<String, Vec<String>> {

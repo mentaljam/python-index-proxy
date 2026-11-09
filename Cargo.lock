@@ -6379,9 +6379,8 @@ dependencies = [
  "humantime-serde",
  "moka",
  "opendal",
+ "percent-encoding",
  "quick-xml 0.42.0",
- "redb 2.6.4",
- "redb 4.5.0",
  "reqwest 0.13.5",
  "rustls 0.23.46",
  "serde",
@@ -6630,15 +6629,6 @@ name = "reblessive"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbc4a4ea2a66a41a1152c4b3d86e8954dc087bdf33af35446e6e176db4e73c8c"
-
-[[package]]
-name = "redb"
-version = "2.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d64e07496d293ad8ed401c4d193d5b9f0f97671fbd5bf21d691a0c7d2c53dc8"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "redb"
