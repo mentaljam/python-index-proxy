@@ -1,27 +1,27 @@
 volumes:
-  minio: {}
+  silo: {}
 
 services:
-  minio:
-    image: minio/minio
+  silo:
+    image: pgsty/silo:RELEASE.2026-11-09T00-00-00Z
     restart: unless-stopped
     command: server --console-address ':9001' /data
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_ROOT_USER: siloadmin
+      MINIO_ROOT_PASSWORD: siloadmin
     volumes:
-      - minio:/data
+      - silo:/data
     ports:
       - '9000:9000'
       - '9001:9001'
 
-  create-minio-bucket:
-    image: minio/mc
+  create-silo-bucket:
+    image: pgsty/silo:RELEASE.2026-11-09T00-00-00Z
     depends_on:
-      - minio
+      - silo
     restart: on-failure:3
     entrypoint: >
       /bin/sh -c "
-      mc alias set minio http://minio:9000 minioadmin minioadmin;
-      mc mb minio/python-index-proxy;
+      mcli alias set silo http://silo:9000 siloadmin siloadmin &&
+      mcli mb --ignore-existing silo/python-index-proxy;
       "
