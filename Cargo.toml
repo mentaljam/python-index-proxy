@@ -23,6 +23,7 @@ moka = { version = "^0.12", features = ["future"] }
 # opendal = "^0.45"
 quick-xml = { version = "^0.42", features = ["async-tokio"] }
 redb = "^4.5"
+redb_legacy = { package = "redb", version = "~2.6" }
 reqwest = { version = "^0.13", features = [
     "brotli",
     "charset",

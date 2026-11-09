@@ -1,5 +1,6 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, path::Path, sync::Arc};
 
+use anyhow::Context;
 use bytes::{Bytes, BytesMut};
 use futures::Stream;
 use moka::future::Cache;
@@ -243,7 +244,7 @@ impl TryFrom<Settings> for State {
             ..
         } = settings;
 
-        let db = Database::create(db_path)?;
+        let db = open_database(&db_path)?;
 
         let index_cache = Cache::builder()
             .time_to_live(index_cache.ttl.into())
@@ -280,6 +281,56 @@ impl TryFrom<Settings> for State {
 
         Ok(Self(Arc::new(data.into())))
     }
+}
+
+fn open_database(path: &Path) -> anyhow::Result<Database> {
+    match Database::create(path) {
+        Ok(db) => return Ok(db),
+        Err(redb::DatabaseError::UpgradeRequired(2)) => {}
+        Err(err) => return Err(err.into()),
+    }
+
+    // Keep the legacy database locked while backing it up and upgrading it.
+    let mut legacy = redb_legacy::Database::open(path)
+        .with_context(|| format!("Failed to open legacy database {}", path.display()))?;
+    let mut backup_path = path.as_os_str().to_owned();
+    backup_path.push(".v2.bak");
+    let backup_path = std::path::PathBuf::from(backup_path);
+
+    tracing::info!(database = %path.display(), backup = %backup_path.display(), "Backing up v2 database before migration");
+    let mut source = std::fs::File::open(path)?;
+    let mut backup = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&backup_path)
+        .with_context(|| {
+            format!(
+                "Failed to create database backup {}; existing backups are never overwritten",
+                backup_path.display()
+            )
+        })?;
+    backup.set_permissions(source.metadata()?.permissions())?;
+    std::io::copy(&mut source, &mut backup)
+        .with_context(|| format!("Failed to copy database to {}", backup_path.display()))?;
+    backup
+        .sync_all()
+        .with_context(|| format!("Failed to sync database backup {}", backup_path.display()))?;
+    drop(backup);
+    drop(source);
+
+    legacy.upgrade().with_context(|| {
+        format!(
+            "Failed to migrate database {}; backup: {}",
+            path.display(),
+            backup_path.display()
+        )
+    })?;
+    drop(legacy);
+
+    let db = Database::open(path)
+        .with_context(|| format!("Failed to open migrated database {}", path.display()))?;
+    tracing::info!(database = %path.display(), "Database migrated from v2 to v3");
+    Ok(db)
 }
 
 pub enum File<S> {

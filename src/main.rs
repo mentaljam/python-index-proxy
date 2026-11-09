@@ -38,7 +38,8 @@ async fn main() {
     }
 
     if let Err(err) = serve().await {
-        tracing::error!("{err}")
+        tracing::error!("{err:#}");
+        std::process::exit(1);
     }
 }
 
