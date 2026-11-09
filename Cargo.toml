@@ -4,8 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [profile.release]
-strip = "symbols"
+codegen-units = 1
 lto = true
+panic = "abort"
+strip = true
 
 [dependencies]
 anyhow = "^1.0"
