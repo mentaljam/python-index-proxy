@@ -279,11 +279,11 @@ class Upstream:
 
 class Proxy:
     __slots__ = (
-        "base_url",
         "binary",
         "config",
         "log_file",
         "opener",
+        "path_prefix",
         "port",
         "process",
         "reservation",
@@ -297,22 +297,23 @@ class Proxy:
         binary: Path,
         root: Path,
         upstream: Upstream,
-        base_url: str = "/",
+        path_prefix: str = "/",
         *,
         storage_root: Path | None = None,
         index_templates: tuple[str, ...] | None = None,
+        public_url: str | None = None,
     ) -> None:
         self.binary = binary
         self.root = root
         self.upstream = upstream
-        self.base_url = base_url
+        self.path_prefix = path_prefix
         self.process: subprocess.Popen[bytes] | None = None
         self.log_file: TextIO | None = None
         # Reserve a port while writing configuration. Release immediately before spawn.
         self.reservation: socket.socket | None = socket.socket()
         self.reservation.bind(("127.0.0.1", 0))
         self.port = self.reservation.getsockname()[1]
-        self.url = f"http://127.0.0.1:{self.port}{base_url}"
+        self.url = f"http://127.0.0.1:{self.port}{path_prefix}"
         self.config = root / "settings.toml"
         templates = (
             index_templates
@@ -321,8 +322,13 @@ class Proxy:
         )
         self.config.write_text(
             f'bind = "127.0.0.1:{self.port}"\n'
-            f"base_url = {json.dumps(base_url)}\n"
-            "[indices]\n"
+            f"path_prefix = {json.dumps(path_prefix)}\n"
+            + (
+                f"public_url = {json.dumps(public_url)}\n"
+                if public_url is not None
+                else ""
+            )
+            + "[indices]\n"
             f"default = {json.dumps(templates)}\n"
             "[storage.fs]\n"
             f"root = {json.dumps(str(storage_root if storage_root is not None else root / 'artifacts'))}\n"
@@ -395,10 +401,11 @@ class Proxy:
 class ProxyFactory(Protocol):
     def __call__(
         self,
-        base_url: str = "/",
+        path_prefix: str = "/",
         *,
         storage_root: Path | None = None,
         index_templates: tuple[str, ...] | None = None,
+        public_url: str | None = None,
     ) -> Proxy: ...
 
 

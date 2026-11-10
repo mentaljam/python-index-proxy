@@ -27,7 +27,9 @@ impl TryFrom<Settings> for State {
     fn try_from(settings: Settings) -> Result<Self, Self::Error> {
         let settings = settings.validated()?;
         let Settings {
-            base_url,
+            bind,
+            path_prefix,
+            public_url,
             index_cache,
             indices,
             storage,
@@ -45,7 +47,8 @@ impl TryFrom<Settings> for State {
             })
             .build();
 
-        let indices_list = format_indices_list(&base_url, &indices).into();
+        let public_url = public_url.unwrap_or_else(|| format!("http://{bind}{path_prefix}"));
+        let indices_list = format_indices_list(&public_url, &indices).into();
 
         let indices = indices
             .into_iter()
@@ -55,7 +58,7 @@ impl TryFrom<Settings> for State {
         let storage = storage.operator()?;
 
         let data = StateData {
-            base_url,
+            public_url,
             http_client: Client::builder()
                 .connect_timeout(upstream.connect_timeout)
                 .build()?,
@@ -80,7 +83,7 @@ pub(crate) struct StateData {
     pub(crate) upstream: Upstream,
     pub(crate) index_permits: Arc<Semaphore>,
     pub(crate) artifact_permits: Arc<Semaphore>,
-    pub(crate) base_url: String,
+    pub(crate) public_url: String,
     pub(crate) http_client: Client,
     pub(crate) index_cache: Cache<String, Arc<PackageDetail>>,
     pub(crate) indices: HashMap<String, Vec<IndexUrlTemplate>>,

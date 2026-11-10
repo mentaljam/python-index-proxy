@@ -12,17 +12,18 @@ use crate::{artifact::File, index::UpstreamIndexError, state};
 
 type AppState = State<state::State>;
 
-pub(crate) fn get_router(base_url: &str) -> Router<state::State> {
+pub(crate) fn get_router(path_prefix: &str) -> Router<state::State> {
     let router = Router::new()
         .route("/", get(list_indices))
+        .route("/{index}/", get(index_info))
         .route("/{index}/{package}/", get(get_detail))
         .layer(CompressionLayer::new())
         .route("/packages/{index}/{package}/{hash}/{file}", get(get_file));
 
-    if base_url == "/" {
+    if path_prefix == "/" {
         router
     } else {
-        Router::new().nest(base_url, router)
+        Router::new().nest(path_prefix, router)
     }
 }
 
@@ -32,6 +33,13 @@ async fn list_indices(State(state): AppState) -> Response {
         .header(header::CONTENT_TYPE, "text/html")
         .body(body.into())
         .unwrap()
+}
+
+async fn index_info(State(state): AppState, Path(index): Path<String>) -> Response {
+    match state.get_index_info(&index) {
+        Some(page) => ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], page).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn get_detail(

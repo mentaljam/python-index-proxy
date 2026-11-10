@@ -224,7 +224,8 @@ async fn artifact_stat_errors_do_not_trigger_upstream_or_cache_writes() {
             .split('"')
             .next()
             .unwrap();
-        let id = href.split('/').nth(4).unwrap().to_owned();
+        let url: url::Url = href.parse().unwrap();
+        let id = url.path().split('/').nth(4).unwrap().to_owned();
         state.0.index_cache.invalidate_all();
         let File::Bytes(bytes) = state
             .get_file("default".into(), "pkg".into(), id.clone(), "pkg.whl".into())

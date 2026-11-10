@@ -31,6 +31,20 @@ impl std::fmt::Display for UpstreamIndexError {
 }
 
 impl State {
+    pub(crate) fn get_index_info(&self, index: &str) -> Option<String> {
+        if !self.0.indices.contains_key(index) {
+            return None;
+        }
+        let url = format!("{}{index}/", self.0.public_url);
+        // Quote shell metacharacters before escaping the HTML text.
+        let quoted_url = format!("'{}'", url.replace('\'', "'\\''")).replace('&', "&amp;");
+        Some(format!(
+            include_str!("./index.html"),
+            index = index,
+            quoted_url = quoted_url
+        ))
+    }
+
     pub async fn get_detail(
         &self,
         index_slug: String,
@@ -106,7 +120,7 @@ impl State {
         permit: Arc<tokio::sync::OwnedSemaphorePermit>,
     ) -> anyhow::Result<Option<Arc<PackageDetail>>> {
         let data = &self.0;
-        let mut parser = DetailParser::new(&data.base_url, index_slug, package);
+        let mut parser = DetailParser::new(&data.public_url, index_slug, package);
         for template in url_templates {
             let Some((final_url, content)) = crate::upstream::index_page(
                 &data.http_client,
@@ -246,13 +260,13 @@ impl PackageDetail {
 }
 
 pub(crate) fn format_indices_list(
-    base_url: &str,
+    link_base: &str,
     indices: &HashMap<String, Vec<String>>,
 ) -> String {
     let mut list = "<!DOCTYPE html>\n<html>\n<body>".into();
-    let base_url = base_url.replace('&', "&amp;");
+    let link_base = link_base.replace('&', "&amp;");
     for index in indices.keys() {
-        list = format!("{list}\n<a href=\"{base_url}{index}/\">{index}</a><br/>");
+        list = format!("{list}\n<a href=\"{link_base}{index}/\">{index}</a><br/>");
     }
     list.push_str("\n</body>\n</html>");
     list

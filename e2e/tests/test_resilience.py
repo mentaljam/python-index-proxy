@@ -190,6 +190,13 @@ def test_overlapping_client_installs_complete_with_identical_artifacts(
     ]
     observer = RequestObserver(proxy, wheel.filename)
     try:
+        # Absolute artifact links must traverse the same observed public HTTP hop.
+        proxy.stop()
+        public_url = observer.index_url.removesuffix("default/")
+        proxy.config.write_text(
+            f"public_url = {json.dumps(public_url)}\n" + proxy.config.read_text()
+        )
+        proxy.start()
         with ThreadPoolExecutor(max_workers=2) as workers:
             pending = [
                 workers.submit(

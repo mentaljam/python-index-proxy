@@ -1,11 +1,18 @@
 # Path-only prefix; a trailing slash is added when omitted.
 # Supports nested URI paths and valid percent escapes, without dot/empty
 # segments, encoded separators, control characters or routing captures.
-base_url = "/"
+path_prefix = "/"
+
+# Optional external application URL for client links and connection commands.
+# When omitted, defaults to http://{bind}{path_prefix}.
+# Its path can differ from path_prefix when an ingress rewrites the path.
+# Must be HTTP(S), without credentials, query or fragment; a trailing slash is added.
+# public_url = "https://packages.example.org/proxy/"
 
 # Index names are case-sensitive ASCII letters/digits with internal '.', '_' or '-'.
 # Sources must be absolute HTTP(S) URLs with exactly one {package} in the path.
 # Query strings and credentials are preserved; the path gets a trailing slash.
+# /{index}/ shows connection instructions; listing all projects is not supported.
 [indices]
 default = [
     "https://download.pytorch.org/whl/cu121/{package}/",

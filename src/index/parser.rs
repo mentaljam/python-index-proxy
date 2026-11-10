@@ -30,14 +30,14 @@ pub(super) struct DetailParser {
 }
 
 impl DetailParser {
-    pub(super) fn new(base_url: &str, index: &str, package: &str) -> Self {
+    pub(super) fn new(link_base: &str, index: &str, package: &str) -> Self {
         Self {
             file_links: HashMap::new(),
             link_count: 0,
             html: Vec::from(b"<!DOCTYPE html>\n<html>\n<body>\n"),
             anchor_start: format!(
                 r#"<a href="{}packages/{}/{}/"#,
-                base_url.replace('&', "&amp;"),
+                link_base.replace('&', "&amp;"),
                 encode_segment(index),
                 encode_segment(package)
             ),

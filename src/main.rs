@@ -46,7 +46,7 @@ async fn main() {
 async fn serve() -> anyhow::Result<()> {
     let settings = Settings::new()?.validated()?;
     let bind = settings.bind;
-    let router = get_router(&settings.base_url);
+    let router = get_router(&settings.path_prefix);
     let state: state::State = settings.try_into()?;
 
     let listener = TcpListener::bind(bind).await?;

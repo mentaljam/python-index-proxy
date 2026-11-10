@@ -13,7 +13,7 @@ from support import Proxy, ProxyFactory, Reply, Upstream, isolated_env
 from test_clients import Links
 
 
-@pytest.mark.parametrize("invalid", ["prefix", "template"])
+@pytest.mark.parametrize("invalid", ["prefix", "template", "public_url"])
 def test_invalid_configuration_fails_before_binding_without_leaking_credentials(
     proxy_binary: Path, tmp_path: Path, *, invalid: str
 ) -> None:
@@ -29,8 +29,13 @@ def test_invalid_configuration_fails_before_binding_without_leaking_credentials(
         config = tmp_path / "invalid.toml"
         config.write_text(
             f'bind = "127.0.0.1:{occupied.getsockname()[1]}"\n'
-            f"base_url = {json.dumps(prefix)}\n"
-            f"[indices]\ndefault = [{json.dumps(template)}]\n"
+            f"path_prefix = {json.dumps(prefix)}\n"
+            + (
+                'public_url = "https://user:private-password@example.test/external/"\n'
+                if invalid == "public_url"
+                else ""
+            )
+            + f"[indices]\ndefault = [{json.dumps(template)}]\n"
             f"[storage.fs]\nroot = {json.dumps(str(tmp_path / 'artifacts'))}\n"
         )
         result = subprocess.run(  # noqa: S603 - Known project binary and generated local configuration.
@@ -44,7 +49,12 @@ def test_invalid_configuration_fails_before_binding_without_leaking_credentials(
         )
     output = result.stdout + result.stderr
     assert result.returncode == 1, output
-    assert ("base_url" if invalid == "prefix" else "indices.default[0]") in output
+    expected_field = {
+        "prefix": "path_prefix",
+        "template": "indices.default[0]",
+        "public_url": "public_url",
+    }[invalid]
+    assert expected_field in output
     assert "private-password" not in output
     assert "Listening" not in output
     assert "panicked" not in output
@@ -69,8 +79,8 @@ def test_project_aliases_share_context_after_restart_and_keep_filenames(
     proxy.stop()
     proxy.config.write_text(
         proxy.config.read_text().replace(
-            'base_url = "/nested/a&b/%7Eroot/"',
-            'base_url = "/nested/a&b/%7Eroot"',
+            'path_prefix = "/nested/a&b/%7Eroot/"',
+            'path_prefix = "/nested/a&b/%7Eroot"',
         )
     )
     proxy.start()

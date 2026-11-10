@@ -146,7 +146,7 @@ mod tests {
             toml::from_str("[s3]\nbucket = 'unused'\n[storage.fs]\nroot = 'artifacts'\n").unwrap();
         assert!(matches!(settings.storage, Storage::Fs(_)));
         assert_eq!(settings.bind.to_string(), "127.0.0.1:3000");
-        assert_eq!(settings.base_url, "/");
+        assert_eq!(settings.path_prefix, "/");
         assert_eq!(
             settings.indices["default"],
             ["https://pypi.org/simple/{package}/"]

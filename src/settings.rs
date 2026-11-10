@@ -7,8 +7,10 @@ use serde::{Deserialize, Serialize};
 pub struct Settings {
     #[serde(default = "defaults::bind")]
     pub bind: SocketAddr,
-    #[serde(default = "defaults::base_url")]
-    pub base_url: String,
+    #[serde(default = "defaults::path_prefix")]
+    pub path_prefix: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_url: Option<String>,
     #[serde(default = "defaults::indices")]
     pub indices: HashMap<String, Vec<String>>,
     #[serde(default)]
@@ -37,7 +39,8 @@ impl Settings {
     pub fn template() -> Self {
         Self {
             bind: defaults::bind(),
-            base_url: defaults::base_url(),
+            path_prefix: defaults::path_prefix(),
+            public_url: None,
             indices: defaults::indices(),
             index_cache: Cache::default(),
             limits: Limits::default(),
@@ -132,7 +135,12 @@ impl Default for Upstream {
 impl Settings {
     pub(crate) fn validated(mut self) -> anyhow::Result<Self> {
         self.validate_resources()?;
-        self.base_url = validate_base_url(&self.base_url)?;
+        self.path_prefix = validate_path_prefix(&self.path_prefix)?;
+        self.public_url = self
+            .public_url
+            .as_deref()
+            .map(validate_public_url)
+            .transpose()?;
         for (index, templates) in &mut self.indices {
             anyhow::ensure!(
                 crate::paths::valid_index_name(index),
@@ -193,14 +201,51 @@ impl Settings {
     }
 }
 
-fn validate_base_url(value: &str) -> anyhow::Result<String> {
+fn validate_public_url(value: &str) -> anyhow::Result<String> {
+    // Keep diagnostics independent of the value: rejected URLs may contain secrets.
+    anyhow::ensure!(
+        !value
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
+            && !value.contains('\\')
+            && value.split_once("://").is_some_and(|(scheme, rest)| {
+                (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+                    && !rest.is_empty()
+                    && !rest.starts_with('/')
+                    && !rest
+                        .split(['/', '?', '#'])
+                        .next()
+                        .unwrap_or("")
+                        .contains('@')
+            }),
+        "public_url must be an absolute HTTP(S) URL without credentials, query or fragment"
+    );
+    let mut url: url::Url = value
+        .parse()
+        .map_err(|_| anyhow::anyhow!("public_url is not a valid URL"))?;
+    anyhow::ensure!(
+        matches!(url.scheme(), "http" | "https")
+            && url.has_host()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none(),
+        "public_url must be an absolute HTTP(S) URL without credentials, query or fragment"
+    );
+    if !url.path().ends_with('/') {
+        url.set_path(&format!("{}/", url.path()));
+    }
+    Ok(url.into())
+}
+
+fn validate_path_prefix(value: &str) -> anyhow::Result<String> {
     anyhow::ensure!(
         value.starts_with('/')
             && !value.starts_with("//")
             && value.bytes().all(|byte| {
                 byte.is_ascii_alphanumeric() || b"/-._~!$&'()*+,;=:@%".contains(&byte)
             }),
-        "base_url must be an absolute URI path prefix without a host, query, fragment or routing captures"
+        "path_prefix must be an absolute URI path prefix without a host, query, fragment or routing captures"
     );
     if value != "/" {
         for segment in value.trim_end_matches('/').split('/').skip(1) {
@@ -210,13 +255,13 @@ fn validate_base_url(value: &str) -> anyhow::Result<String> {
                     anyhow::ensure!(
                         bytes.next().is_some_and(|byte| byte.is_ascii_hexdigit())
                             && bytes.next().is_some_and(|byte| byte.is_ascii_hexdigit()),
-                        "base_url contains an invalid percent escape"
+                        "path_prefix contains an invalid percent escape"
                     );
                 }
             }
             let decoded = percent_encoding::percent_decode_str(segment)
                 .decode_utf8()
-                .map_err(|_| anyhow::anyhow!("base_url contains invalid UTF-8"))?;
+                .map_err(|_| anyhow::anyhow!("path_prefix contains invalid UTF-8"))?;
             anyhow::ensure!(
                 !decoded.is_empty()
                     && decoded != "."
@@ -224,12 +269,12 @@ fn validate_base_url(value: &str) -> anyhow::Result<String> {
                     && !decoded.starts_with([':', '*'])
                     && !decoded.contains(['/', '\\', '{', '}'])
                     && !decoded.chars().any(char::is_control),
-                "base_url must contain nonempty safe path segments, without dot segments or routing captures"
+                "path_prefix must contain nonempty safe path segments, without dot segments or routing captures"
             );
         }
         anyhow::ensure!(
             !value.contains("//"),
-            "base_url must not contain empty path segments"
+            "path_prefix must not contain empty path segments"
         );
     }
     Ok(if value.ends_with('/') {
@@ -246,7 +291,7 @@ mod defaults {
         "127.0.0.1:3000".parse().unwrap()
     }
 
-    pub fn base_url() -> String {
+    pub fn path_prefix() -> String {
         "/".into()
     }
 
@@ -282,6 +327,46 @@ mod tests {
             Duration::from_secs(60)
         );
         settings.validate_resources().unwrap();
+        assert!(settings.public_url.is_none());
+    }
+
+    #[test]
+    fn public_url_is_optional_independent_and_rejects_secrets_without_echoing_them() {
+        let mut settings = Settings::template();
+        settings.path_prefix = "/internal".into();
+        settings.public_url = Some("HTTPS://Packages.Example.test/external/a&b".into());
+        let settings = settings.validated().unwrap();
+        assert_eq!(settings.path_prefix, "/internal/");
+        assert_eq!(
+            settings.public_url.as_deref(),
+            Some("https://packages.example.test/external/a&b/")
+        );
+        for value in [
+            "",
+            "/relative/",
+            "//example.test/",
+            "https:/example.test/",
+            "https:///example.test/",
+            "ftp://example.test/",
+            "https://user:private-password@example.test/",
+            "https://@example.test/",
+            "https://example.test/?token=private-password",
+            "https://example.test/#private-password",
+            "https://example.test/?",
+            "https://example.test/#",
+            "https://example.test/ space",
+            "https://example.test/\\path",
+        ] {
+            let mut settings = Settings::template();
+            settings.public_url = Some(value.into());
+            let error = match settings.validated() {
+                Ok(_) => panic!("accepted invalid public_url"),
+                Err(error) => format!("{error:#}"),
+            };
+            assert!(error.contains("public_url"));
+            assert!(!error.contains("private-password"));
+            assert!(!error.contains("example.test"));
+        }
     }
 
     #[test]
@@ -312,14 +397,14 @@ mod tests {
     #[test]
     fn validate_programmatic_settings_and_normalize_path_templates() {
         let mut settings = Settings::template();
-        settings.base_url = "/nested/a&b/%7Eroot".into();
+        settings.path_prefix = "/nested/a&b/%7Eroot".into();
         settings.indices = [(
             "Private_1.example".into(),
             vec!["https://user:secret@example.test/simple/{package}?token=private".into()],
         )]
         .into();
         let settings = settings.validated().unwrap();
-        assert_eq!(settings.base_url, "/nested/a&b/%7Eroot/");
+        assert_eq!(settings.path_prefix, "/nested/a&b/%7Eroot/");
         let template = &settings.indices["Private_1.example"][0];
         assert_eq!(
             template,
@@ -357,7 +442,7 @@ mod tests {
             "/api/ space/",
         ] {
             let mut settings = Settings::template();
-            settings.base_url = prefix.into();
+            settings.path_prefix = prefix.into();
             assert!(settings.validated().is_err(), "accepted prefix {prefix:?}");
         }
         for index in [

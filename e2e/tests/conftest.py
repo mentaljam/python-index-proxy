@@ -145,10 +145,11 @@ def proxy_factory_fixture(
     request.node.stash[PROXIES] = proxies
 
     def create(
-        base_url: str = "/",
+        path_prefix: str = "/",
         *,
         storage_root: Path | None = None,
         index_templates: tuple[str, ...] | None = None,
+        public_url: str | None = None,
     ) -> Proxy:
         directory = tmp_path / f"proxy-{len(proxies)}"
         directory.mkdir()
@@ -156,9 +157,10 @@ def proxy_factory_fixture(
             proxy_binary,
             directory,
             upstream,
-            base_url,
+            path_prefix,
             storage_root=storage_root,
             index_templates=index_templates,
+            public_url=public_url,
         )
         proxies.append(proxy)
         proxy.start()

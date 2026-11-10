@@ -90,7 +90,7 @@ def test_restart_keeps_artifacts_but_refetches_pages(
 
 
 @pytest.mark.usefixtures("wheels")
-def test_install_under_base_url(
+def test_install_under_path_prefix(
     client: Client,
     proxy_factory: ProxyFactory,
     upstream: Upstream,

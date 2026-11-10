@@ -9,6 +9,8 @@ use bytes::Bytes;
 use crate::{
     artifact::File,
     index::{ArtifactSource, PackageDetail},
+    settings::Settings,
+    state::State,
     test_support::index_failure_state,
 };
 
@@ -161,4 +163,27 @@ async fn stale_cached_page_refreshes_for_an_unknown_artifact_identifier() {
     })
     .await
     .expect("stale page recovery must complete");
+}
+
+#[test]
+fn default_public_url_uses_the_configured_socket_address_and_normalized_prefix() {
+    let root = std::env::temp_dir().join(format!("pipr-public-url-{}", std::process::id()));
+    for (bind, expected) in [
+        ("127.0.0.1:3000", "http://127.0.0.1:3000/proxy/"),
+        ("[::1]:3000", "http://[::1]:3000/proxy/"),
+        ("0.0.0.0:3000", "http://0.0.0.0:3000/proxy/"),
+        ("[::]:3000", "http://[::]:3000/proxy/"),
+    ] {
+        let mut settings = Settings::template();
+        settings.bind = bind.parse().unwrap();
+        settings.path_prefix = "/proxy".into();
+        let mut config = opendal::services::FsConfig::default();
+        config.root = Some(root.to_str().unwrap().into());
+        settings.storage = crate::storage::Storage::Fs(config);
+        let state = State::try_from(settings).unwrap();
+        assert_eq!(state.0.public_url, expected);
+    }
+    if root.exists() {
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

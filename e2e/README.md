@@ -5,6 +5,29 @@ real proxy binary and real pip / uv clients against a local HTTP package index.
 Wheels and PEP 658 metadata are generated locally using the Python standard
 library; no package fixtures are downloaded from PyPI.
 
+## Index roots
+
+`/{index}/` is an informational HTML page with pip and uv connection examples.
+It uses the resolved public URL and does not contact or expose upstreams.
+`path_prefix` replaces the previous `base_url` configuration key and controls
+application routing (default `/`). Optional `public_url` supplies the external
+HTTP(S) application URL for landing links, artifact links and connection examples.
+It must not contain credentials, query parameters or a fragment. Both settings
+receive a trailing slash when the slash is omitted; their paths may differ for ingress rewrites.
+For example, `path_prefix = "/"` and `public_url = "https://packages.example.org/proxy/"`
+support an ingress that strips `/proxy/` before forwarding requests.
+
+Without `public_url`, the application constructs its public base as
+`http://{bind}{path_prefix}`, retaining the configured bind address (including
+wildcard addresses). Set `public_url` when clients need a different host, HTTPS
+or an externally rewritten path. Request headers do not determine the public URL.
+Unknown index names return 404, and index names remain case-sensitive.
+Use the trailing slash; the slashless root is not redirected.
+
+Project enumeration is not supported. The informational root does not implement
+the Simple Repository API's complete project-list requirement; package detail
+and artifact routes remain available for requests for named projects.
+
 ## Run
 
 Prerequisites: Rust/Cargo, uv, and an installed Python >= 3.12 with `venv` and
@@ -110,7 +133,7 @@ Both tools target the project's minimum Python version, 3.12.
   artifact URLs also work after restart; artifact filenames remain unchanged.
   Configured index names remain case-sensitive. Invalid names return 404
   without upstream requests, including when an artifact is already cached.
-- A non-root `base_url`, PEP 658 metadata (and its absence), relative links after
+- A non-root `path_prefix`, PEP 658 metadata (and its absence), relative links after
   redirects, and query parameters exercise client compatibility.
 - A wheel with a 12 MiB payload exercises streaming and subsequent cache reads;
   installed payload size and SHA-256 must match.
