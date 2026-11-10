@@ -61,22 +61,19 @@ async fn dropped_initial_reply_or_unpolled_body_aborts_and_releases_registration
         for prefix_size in [0, CHUNK_SIZE + 1] {
             let (state, root, response, upstream) = cancellation_fixture(prefix_size).await;
             let (reply, result) = oneshot::channel();
-            let mut download = Box::pin(download_response(
-                state.0.clone(),
-                "artifact.whl".into(),
-                async move { Ok(Some(response)) },
-                reply,
-            ));
+            let download_state = state.0.clone();
+            let mut download = Box::pin(async move {
+                download_response(
+                    &download_state,
+                    "artifact.whl".into(),
+                    async move { Ok(Some(response)) },
+                    reply,
+                )
+                .await
+            });
             assert!(futures::poll!(&mut download).is_pending());
             if prefix_size == 0 {
-                assert!(
-                    state
-                        .0
-                        .read()
-                        .await
-                        .download_locks
-                        .contains_key("artifact.whl")
-                );
+                assert!(state.0.download_locks.contains_key("artifact.whl"));
                 drop(result);
                 download.await;
             } else {
@@ -96,7 +93,7 @@ async fn dropped_initial_reply_or_unpolled_body_aborts_and_releases_registration
                 owner.await.unwrap();
             }
             upstream.await.unwrap();
-            assert!(state.0.read().await.download_locks.is_empty());
+            assert!(state.0.download_locks.is_empty());
             assert!(!root.join("artifact.whl").exists());
             assert_eq!(std::fs::read_dir(root.join(".tmp")).unwrap().count(), 0);
             drop(state);
@@ -111,16 +108,20 @@ async fn dropped_initial_reply_or_unpolled_body_aborts_and_releases_registration
 async fn cancelled_waiter_preserves_active_download_registration() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let (state, root, response, upstream) = cancellation_fixture(0).await;
-        let locks = state.0.read().await.download_locks.clone();
+        let locks = state.0.download_locks.clone();
         let lease = locks.lease("artifact.whl".into());
         let active = lease.entry.lock().await;
         let (reply, result) = oneshot::channel();
-        let mut download = Box::pin(download_response(
-            state.0.clone(),
-            "artifact.whl".into(),
-            async move { Ok(Some(response)) },
-            reply,
-        ));
+        let download_state = state.0.clone();
+        let mut download = Box::pin(async move {
+            download_response(
+                &download_state,
+                "artifact.whl".into(),
+                async move { Ok(Some(response)) },
+                reply,
+            )
+            .await
+        });
         assert!(futures::poll!(&mut download).is_pending());
         drop(result);
         download.await;
@@ -128,7 +129,7 @@ async fn cancelled_waiter_preserves_active_download_registration() {
         assert!(locks.contains_key("artifact.whl"));
         drop(active);
         drop(lease);
-        assert!(state.0.read().await.download_locks.is_empty());
+        assert!(state.0.download_locks.is_empty());
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     })
@@ -142,16 +143,23 @@ async fn upstream_read_timeout_aborts_and_releases_download_budget() {
         use futures::TryStreamExt;
 
         for prefix in [0, CHUNK_SIZE + 1] {
-            let (state, root, response, upstream) = cancellation_fixture(prefix).await;
-            state.0.write().await.upstream.read_timeout = Duration::from_millis(50);
-            let permits = state.0.read().await.artifact_permits.clone();
+            let (mut state, root, response, upstream) = cancellation_fixture(prefix).await;
+            std::sync::Arc::get_mut(&mut state.0)
+                .unwrap()
+                .upstream
+                .read_timeout = Duration::from_millis(50);
+            let permits = state.0.artifact_permits.clone();
             let (reply, result) = oneshot::channel();
-            let owner = tokio::spawn(download_response(
-                state.0.clone(),
-                "artifact.whl".into(),
-                async move { Ok(Some(response)) },
-                reply,
-            ));
+            let download_state = state.0.clone();
+            let owner = tokio::spawn(async move {
+                download_response(
+                    &download_state,
+                    "artifact.whl".into(),
+                    async move { Ok(Some(response)) },
+                    reply,
+                )
+                .await
+            });
             let error = match result.await.unwrap() {
                 Err(error) => error,
                 Ok(File::Stream(stream)) => stream.try_collect::<Vec<_>>().await.unwrap_err(),
@@ -161,7 +169,7 @@ async fn upstream_read_timeout_aborts_and_releases_download_budget() {
             owner.await.unwrap();
             upstream.await.unwrap();
             assert_eq!(permits.available_permits(), 16);
-            assert!(state.0.read().await.download_locks.is_empty());
+            assert!(state.0.download_locks.is_empty());
             assert!(!root.join("artifact.whl").exists());
             if prefix > 0 {
                 assert_eq!(std::fs::read_dir(root.join(".tmp")).unwrap().count(), 0);

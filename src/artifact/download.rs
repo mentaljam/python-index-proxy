@@ -1,8 +1,8 @@
-use std::{future::Future, sync::Arc};
+use std::future::Future;
 
 use bytes::{Bytes, BytesMut};
 use opendal::Operator;
-use tokio::sync::{RwLock, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::{coordination::ResourceLimit, settings::Upstream, state::StateData};
 
@@ -14,7 +14,7 @@ const CHUNK_BUFFER_SIZE: usize = CHUNK_SIZE + 512 * 1024;
 // The task owns the writer until close/abort completes. Dropping an HTTP body only
 // closes its receiver; it never cancels an in-flight OpenDAL write operation.
 pub(super) async fn download_response(
-    state: Arc<RwLock<StateData>>,
+    state: &StateData,
     path: String,
     fetch: impl Future<Output = anyhow::Result<Option<reqwest::Response>>> + Send,
     reply: oneshot::Sender<anyhow::Result<File>>,
@@ -23,16 +23,8 @@ pub(super) async fn download_response(
         reply: Some(reply),
         body: None,
     };
-    let (locks, storage, permits, upstream) = {
-        let data = state.read().await;
-        (
-            data.download_locks.clone(),
-            data.storage.clone(),
-            data.artifact_permits.clone(),
-            data.upstream,
-        )
-    };
-    let lease = locks.lease(path.clone());
+    let storage = &state.storage;
+    let lease = state.download_locks.lease(path.clone());
     let file_guard = tokio::select! {
         biased;
         _ = output.closed() => return,
@@ -43,11 +35,25 @@ pub(super) async fn download_response(
     let result = async {
         // Same-key waiters can use a completed object even while other fills
         // exhaust the global budget. Only a new fill needs a permit.
-        if let Some(file) = stored_file(&storage, &path).await? {
+        if let Some(file) = stored_file(storage, &path).await? {
             return Ok(Some(file));
         }
-        permit = Some(permits.try_acquire_owned().map_err(|_| ResourceLimit)?);
-        fill_artifact(&storage, &path, fetch, &mut output, &mut writer, upstream).await
+        permit = Some(
+            state
+                .artifact_permits
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| ResourceLimit)?,
+        );
+        fill_artifact(
+            storage,
+            &path,
+            fetch,
+            &mut output,
+            &mut writer,
+            state.upstream,
+        )
+        .await
     }
     .await;
     if let Some(mut writer) = writer

@@ -60,7 +60,7 @@ async fn uncacheable_package_details_remain_usable_for_the_current_request() {
             .unwrap()
             .unwrap();
         let id = detail.files.keys().next().unwrap().clone();
-        let cache = state.0.read().await.index_cache.clone();
+        let cache = state.0.index_cache.clone();
         cache.run_pending_tasks().await;
         assert!(cache.get("default/pkg").await.is_none());
         let File::Bytes(bytes) = state
@@ -127,7 +127,7 @@ async fn stale_cached_page_refreshes_for_an_unknown_artifact_identifier() {
             .into(),
         });
         assert!(!stale.files.contains_key(&id));
-        let cache = state.0.read().await.index_cache.clone();
+        let cache = state.0.index_cache.clone();
         cache.insert("default/pkg".into(), stale.clone()).await;
         assert!(Arc::ptr_eq(
             &cache.get("default/pkg").await.unwrap(),

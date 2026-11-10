@@ -27,7 +27,7 @@ pub(crate) fn get_router(base_url: &str) -> Router<state::State> {
 }
 
 async fn list_indices(State(state): AppState) -> Response {
-    let body = state.get_indices_list().await;
+    let body = state.get_indices_list();
     Response::builder()
         .header(header::CONTENT_TYPE, "text/html")
         .body(body.into())

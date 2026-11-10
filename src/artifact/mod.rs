@@ -33,29 +33,21 @@ impl State {
         let package = package.to_string();
         if !valid_index_name(&index)
             || !valid_filename(&file)
-            || !self.0.read().await.indices.contains_key(&index)
+            || !self.0.indices.contains_key(&index)
         {
             return Ok(File::None);
         }
         tracing::debug!("processing request for {file}");
         let object_path = artifact_path(&index, &package, &hash, &file);
 
-        let storage = self.0.read().await.storage.clone();
-        if let Some(file) = stored_file(&storage, &object_path).await? {
+        if let Some(file) = stored_file(&self.0.storage, &object_path).await? {
             return Ok(file);
         }
         let (reply, result) = oneshot::channel();
         let state = self.clone();
-        let fetch = {
-            let state = self.clone();
-            async move {
-                state
-                    .artifact_response(&index, &package, &hash, &file)
-                    .await
-            }
-        };
         tokio::spawn(async move {
-            download_response(state.0, object_path, fetch, reply).await;
+            let fetch = state.artifact_response(&index, &package, &hash, &file);
+            download_response(&state.0, object_path, fetch, reply).await;
         });
         result.await?
     }
@@ -67,10 +59,6 @@ impl State {
         hash: &str,
         file: &str,
     ) -> anyhow::Result<Option<reqwest::Response>> {
-        let (http_client, upstream) = {
-            let data = self.0.read().await;
-            (data.http_client.clone(), data.upstream)
-        };
         let Some(detail) = self.package_detail(index, package, Some(hash)).await? else {
             return Ok(None);
         };
@@ -85,7 +73,8 @@ impl State {
             url.set_path(&format!("{}.metadata", url.path()));
         }
 
-        let response = crate::upstream::send(&http_client, url.clone(), upstream).await?;
+        let response =
+            crate::upstream::send(&self.0.http_client, url.clone(), self.0.upstream).await?;
         if !response.status().is_success() {
             anyhow::bail!("Failed to get {url}")
         }

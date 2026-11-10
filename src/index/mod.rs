@@ -7,7 +7,6 @@ use std::{
 };
 
 use bytes::Bytes;
-use reqwest::Client;
 use tokio::sync::Mutex;
 use url::Url;
 use uv_normalize::PackageName;
@@ -15,7 +14,6 @@ use uv_normalize::PackageName;
 use crate::{
     coordination::ResourceLimit,
     paths::{encode_segment, valid_index_name},
-    settings::Upstream,
     state::State,
 };
 
@@ -57,15 +55,9 @@ impl State {
             return Ok(None);
         };
         let package = package.as_str();
-        let (index_cache, http_client, base_url, url_templates) = {
-            let data = self.0.read().await;
-            (
-                data.index_cache.clone(),
-                data.http_client.clone(),
-                data.base_url.clone(),
-                data.indices.get(index_slug).cloned(),
-            )
-        };
+        let data = &self.0;
+        let index_cache = &data.index_cache;
+        let url_templates = data.indices.get(index_slug);
         let cache_key = format!("{}/{}", encode_segment(index_slug), encode_segment(package));
         if let Some(detail) = index_cache.get(&cache_key).await
             && artifact_id.is_none_or(|id| detail.files.contains_key(id))
@@ -75,8 +67,7 @@ impl State {
         let Some(url_templates) = url_templates else {
             return Ok(None);
         };
-        let refreshes = self.0.read().await.index_refreshes.clone();
-        let lease = refreshes.lease(cache_key.clone());
+        let lease = data.index_refreshes.lease(cache_key.clone());
         let revision = lease.entry.revision.load(Ordering::Acquire);
         let mut previous = lease.entry.result.lock().await;
         if lease.entry.revision.load(Ordering::Acquire) != revision
@@ -90,27 +81,10 @@ impl State {
         {
             return Ok(Some(detail));
         }
-        let (permits, upstream, max_size) = {
-            let data = self.0.read().await;
-            (
-                data.index_permits.clone(),
-                data.upstream,
-                data.limits.max_index_page_size,
-            )
-        };
-        let result = match permits.try_acquire_owned() {
+        let result = match data.index_permits.clone().try_acquire_owned() {
             Ok(permit) => {
-                Self::fetch_package_detail(
-                    index_slug,
-                    package,
-                    &base_url,
-                    url_templates,
-                    http_client,
-                    upstream,
-                    max_size,
-                    Arc::new(permit),
-                )
-                .await
+                self.fetch_package_detail(index_slug, package, url_templates, Arc::new(permit))
+                    .await
             }
             Err(_) => Err(anyhow::Error::new(ResourceLimit)),
         };
@@ -124,27 +98,21 @@ impl State {
         shared
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "Explicit immutable refresh inputs and owned permit"
-    )]
     async fn fetch_package_detail(
+        &self,
         index_slug: &str,
         package: &str,
-        base_url: &str,
-        url_templates: Vec<IndexUrlTemplate>,
-        http_client: Client,
-        upstream: Upstream,
-        max_size: u64,
+        url_templates: &[IndexUrlTemplate],
         permit: Arc<tokio::sync::OwnedSemaphorePermit>,
     ) -> anyhow::Result<Option<Arc<PackageDetail>>> {
-        let mut parser = DetailParser::new(base_url, index_slug, package);
+        let data = &self.0;
+        let mut parser = DetailParser::new(&data.base_url, index_slug, package);
         for template in url_templates {
             let Some((final_url, content)) = crate::upstream::index_page(
-                &http_client,
+                &data.http_client,
                 template.package_url(package)?,
-                upstream,
-                max_size,
+                data.upstream,
+                data.limits.max_index_page_size,
             )
             .await?
             else {

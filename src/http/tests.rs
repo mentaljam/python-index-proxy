@@ -156,13 +156,14 @@ async fn artifact_stat_errors_do_not_trigger_upstream_or_cache_writes() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let upstream = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let (state, root) = index_failure_state(vec![format!("{endpoint}/simple/{{package}}/")]);
+        let (mut state, root) =
+            index_failure_state(vec![format!("{endpoint}/simple/{{package}}/")]);
         let controls = StatFailureLayer {
             failure: Arc::new(std::sync::Mutex::new(None)),
             writes: Arc::new(AtomicUsize::new(0)),
         };
         {
-            let mut data = state.0.write().await;
+            let data = Arc::get_mut(&mut state.0).unwrap();
             data.storage = data.storage.clone().layer(controls.clone());
         }
         let unknown_id = "0".repeat(64);
@@ -205,7 +206,7 @@ async fn artifact_stat_errors_do_not_trigger_upstream_or_cache_writes() {
                 0,
                 "storage errors must not attempt writes"
             );
-            let data = state.0.read().await;
+            let data = &state.0;
             assert!(data.index_cache.get("default/pkg").await.is_none());
             assert!(data.download_locks.is_empty());
         }
@@ -224,7 +225,7 @@ async fn artifact_stat_errors_do_not_trigger_upstream_or_cache_writes() {
             .next()
             .unwrap();
         let id = href.split('/').nth(4).unwrap().to_owned();
-        state.0.read().await.index_cache.invalidate_all();
+        state.0.index_cache.invalidate_all();
         let File::Bytes(bytes) = state
             .get_file("default".into(), "pkg".into(), id.clone(), "pkg.whl".into())
             .await
@@ -235,7 +236,7 @@ async fn artifact_stat_errors_do_not_trigger_upstream_or_cache_writes() {
         assert_eq!(bytes, b"complete wheel".as_slice());
         assert_eq!(requests.load(Ordering::SeqCst), 3);
         assert_eq!(controls.writes.load(Ordering::SeqCst), 1);
-        state.0.read().await.index_cache.invalidate_all();
+        state.0.index_cache.invalidate_all();
         let File::Stream(stream) = state
             .get_file("default".into(), "pkg".into(), id, "pkg.whl".into())
             .await
@@ -322,16 +323,7 @@ async fn upstream_index_failures_return_bad_gateway_without_caching_partial_page
             )
             .await;
             assert_eq!(response.status(), expected, "sources: {sources:?}");
-            assert!(
-                state
-                    .0
-                    .read()
-                    .await
-                    .index_cache
-                    .get("default/pkg")
-                    .await
-                    .is_none()
-            );
+            assert!(state.0.index_cache.get("default/pkg").await.is_none());
             let response = super::get_file(
                 axum::extract::State(state.clone()),
                 Path((
@@ -361,16 +353,7 @@ async fn upstream_index_failures_return_bad_gateway_without_caching_partial_page
                 .await
                 .is_err()
         );
-        assert!(
-            state
-                .0
-                .read()
-                .await
-                .index_cache
-                .get("default/pkg")
-                .await
-                .is_none()
-        );
+        assert!(state.0.index_cache.get("default/pkg").await.is_none());
         recovering_status.store(200, Ordering::SeqCst);
         let detail = state
             .package_detail("default", "pkg", None)
@@ -384,16 +367,7 @@ async fn upstream_index_failures_return_bad_gateway_without_caching_partial_page
             .collect();
         filenames.sort();
         assert_eq!(filenames, ["200.whl", "recover.whl"]);
-        assert!(
-            state
-                .0
-                .read()
-                .await
-                .index_cache
-                .get("default/pkg")
-                .await
-                .is_some()
-        );
+        assert!(state.0.index_cache.get("default/pkg").await.is_some());
         drop(state);
         upstream.abort();
         std::fs::remove_dir_all(root).unwrap();

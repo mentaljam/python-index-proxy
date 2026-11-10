@@ -1,9 +1,10 @@
 use std::{collections::HashMap, sync::Arc};
 
+use bytes::Bytes;
 use moka::future::Cache;
 use opendal::Operator;
 use reqwest::Client;
-use tokio::sync::{Mutex, RwLock, Semaphore};
+use tokio::sync::{Mutex, Semaphore};
 
 use crate::{
     coordination::KeyedFlights,
@@ -12,11 +13,11 @@ use crate::{
 };
 
 #[derive(Clone)]
-pub(crate) struct State(pub(crate) Arc<RwLock<StateData>>);
+pub(crate) struct State(pub(crate) Arc<StateData>);
 
 impl State {
-    pub async fn get_indices_list(&self) -> String {
-        self.0.read().await.indices_list.clone()
+    pub fn get_indices_list(&self) -> Bytes {
+        self.0.indices_list.clone()
     }
 }
 
@@ -44,7 +45,7 @@ impl TryFrom<Settings> for State {
             })
             .build();
 
-        let indices_list = format_indices_list(&base_url, &indices);
+        let indices_list = format_indices_list(&base_url, &indices).into();
 
         let indices = indices
             .into_iter()
@@ -70,7 +71,7 @@ impl TryFrom<Settings> for State {
             index_refreshes: KeyedFlights::default(),
         };
 
-        Ok(Self(Arc::new(data.into())))
+        Ok(Self(Arc::new(data)))
     }
 }
 
@@ -83,7 +84,7 @@ pub(crate) struct StateData {
     pub(crate) http_client: Client,
     pub(crate) index_cache: Cache<String, Arc<PackageDetail>>,
     pub(crate) indices: HashMap<String, Vec<IndexUrlTemplate>>,
-    indices_list: String,
+    indices_list: Bytes,
     pub(crate) storage: Operator,
     pub(crate) download_locks: KeyedFlights<Mutex<()>>,
     pub(crate) index_refreshes: KeyedFlights<IndexRefresh>,

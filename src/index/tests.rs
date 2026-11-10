@@ -63,16 +63,16 @@ async fn concurrent_index_refreshes_share_uncacheable_stale_missing_and_error_re
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let endpoint = format!("http://{}", listener.local_addr().unwrap());
             let upstream = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-            let (state, root) =
+            let (mut state, root) =
                 index_failure_state(vec![format!("{endpoint}/simple/{{package}}/")]);
             // A one-byte budget cannot retain any parsed page. The shared in-flight
             // result must still reach concurrent callers, including missing-ID refreshes.
-            state.0.write().await.index_cache = Cache::builder()
+            Arc::get_mut(&mut state.0).unwrap().index_cache = Cache::builder()
                 .max_capacity(if stale { 1024 * 1024 } else { 1 })
                 .weigher(|_: &String, value: &Arc<PackageDetail>| value.byte_len() as u32)
                 .build();
             if stale {
-                let cache = state.0.read().await.index_cache.clone();
+                let cache = state.0.index_cache.clone();
                 cache
                     .insert("default/pkg".into(), page(b"stale page"))
                     .await;
@@ -117,9 +117,9 @@ async fn concurrent_index_refreshes_share_uncacheable_stale_missing_and_error_re
             }
             let wave_requests = if cancel_owner { 2 } else { 1 };
             assert_eq!(requests.load(Ordering::SeqCst), wave_requests);
-            assert!(state.0.read().await.index_refreshes.is_empty());
+            assert!(state.0.index_refreshes.is_empty());
             current_status.store(200, Ordering::SeqCst);
-            state.0.read().await.index_cache.run_pending_tasks().await;
+            state.0.index_cache.run_pending_tasks().await;
             assert!(
                 state
                     .package_detail("default", "pkg", Some("missing-id"))
@@ -191,16 +191,14 @@ async fn slow_index_fetch_does_not_block_unrelated_requests() {
             async move { state.get_detail("default".into(), "slow".into()).await }
         });
         body_started.notified().await;
-        let indices = tokio::time::timeout(Duration::from_secs(1), state.get_indices_list())
-            .await
-            .expect("slow upstream body must not block unrelated state reads");
-        assert!(indices.contains("default"));
+        let indices = state.get_indices_list();
+        assert!(std::str::from_utf8(&indices).unwrap().contains("default"));
         let fast = tokio::time::timeout(
             Duration::from_secs(1),
             state.get_detail("default".into(), "fast".into()),
         )
         .await
-        .expect("slow upstream body must not hold the database write transaction")
+        .expect("slow upstream body must not block another package")
         .unwrap()
         .unwrap();
         assert!(
@@ -257,7 +255,7 @@ async fn index_cache_capacity_counts_key_and_payload_bytes() {
     config.root = Some(root.join("artifacts").to_str().unwrap().into());
     settings.storage = crate::storage::Storage::Fs(config);
     let state = State::try_from(settings).unwrap();
-    let cache = state.0.read().await.index_cache.clone();
+    let cache = state.0.index_cache.clone();
 
     // Four UTF-8 key bytes and eight payload bytes exactly fill the budget.
     cache.insert("é/x".into(), page(b"12345678")).await;

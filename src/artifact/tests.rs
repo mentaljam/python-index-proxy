@@ -70,7 +70,7 @@ async fn artifact_waiters_queue_before_upstream_response_headers() {
                 1,
                 "waiter must not fetch while owner's headers are pending"
             );
-            let locks = state.0.read().await.download_locks.clone();
+            let locks = state.0.download_locks.clone();
             if locks.has_waiters(&path) {
                 break;
             }
@@ -89,7 +89,7 @@ async fn artifact_waiters_queue_before_upstream_response_headers() {
             b"complete artifact"
         );
         assert_eq!(requests.load(Ordering::SeqCst), 1);
-        assert!(state.0.read().await.download_locks.is_empty());
+        assert!(state.0.download_locks.is_empty());
         upstream.abort();
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
@@ -185,7 +185,7 @@ async fn coordinated_artifact_downloads(cancel_owner: bool) {
         assert!(futures::poll!(&mut waiter).is_pending());
         let path = artifact_path("default", "pkg", &id, "pkg.whl");
         loop {
-            let locks = state.0.read().await.download_locks.clone();
+            let locks = state.0.download_locks.clone();
             if locks.has_waiters(&path) {
                 break;
             }
@@ -248,7 +248,7 @@ async fn coordinated_artifact_downloads(cancel_owner: bool) {
             );
         }
         release.notify_one();
-        assert!(state.0.read().await.download_locks.is_empty());
+        assert!(state.0.download_locks.is_empty());
         assert_eq!(std::fs::read_dir(root.join(".tmp")).unwrap().count(), 0);
         upstream.abort();
         drop(state);
@@ -274,7 +274,7 @@ async fn get_file_rejects_malformed_identifiers_before_storage_lookup() {
     config.root = Some(root.join("artifacts").to_str().unwrap().into());
     settings.storage = crate::storage::Storage::Fs(config);
     let state = State::try_from(settings).unwrap();
-    let storage = state.0.read().await.storage.clone();
+    let storage = state.0.storage.clone();
     let nonhex = "g".repeat(64);
     storage
         .write(
@@ -391,8 +391,6 @@ async fn failed_download_fixture(
     });
     state
         .0
-        .read()
-        .await
         .index_cache
         .insert("default/package".into(), detail)
         .await;
@@ -416,7 +414,7 @@ async fn failed_writer_close_aborts_cleans_up_and_allows_retry() {
         let object = root.join("artifacts/default/package/ab/cd/abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab/package%2Ewhl");
         std::fs::create_dir_all(&object).unwrap();
         assert!(stream.try_collect::<Vec<_>>().await.is_err());
-        assert!(state.0.read().await.download_locks.is_empty());
+        assert!(state.0.download_locks.is_empty());
         assert_eq!(
             std::fs::read_dir(root.join("artifacts/.tmp"))
                 .unwrap()
@@ -435,7 +433,7 @@ async fn failed_writer_close_aborts_cleans_up_and_allows_retry() {
         let chunks = stream.try_collect::<Vec<_>>().await.unwrap();
         assert_eq!(chunks.concat(), body.as_ref());
         assert_eq!(std::fs::read(&object).unwrap(), body.as_ref());
-        assert!(state.0.read().await.download_locks.is_empty());
+        assert!(state.0.download_locks.is_empty());
         upstream.abort();
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
@@ -461,7 +459,7 @@ async fn upstream_body_failure_aborts_without_publishing_and_cleans_up() {
                 }
                 _ => panic!("truncated response must fail"),
             }
-            assert!(state.0.read().await.download_locks.is_empty());
+            assert!(state.0.download_locks.is_empty());
             assert!(
                 !root
                     .join("artifacts/default/package/ab/cd/abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab/package%2Ewhl")
@@ -499,7 +497,7 @@ async fn waiting_download_allows_active_download_to_finish() {
     settings.storage = crate::storage::Storage::Fs(config);
     let state = State::try_from(settings).unwrap();
     let hash = "abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab";
-    let locks = state.0.read().await.download_locks.clone();
+    let locks = state.0.download_locks.clone();
     let path = artifact_path("default", "package", hash, "package.whl");
     let lease = locks.lease(path);
     let active_download = lease.entry.lock().await;
@@ -512,7 +510,7 @@ async fn waiting_download_allows_active_download_to_finish() {
     ));
     // Polling to Pending puts the request at the held file lock without sleeps.
     assert!(futures::poll!(&mut waiting_download).is_pending());
-    let storage = state.0.read().await.storage.clone();
+    let storage = state.0.storage.clone();
     storage
         .write(
             "default/package/ab/cd/abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab/package%2Ewhl",
@@ -520,11 +518,6 @@ async fn waiting_download_allows_active_download_to_finish() {
         )
         .await
         .unwrap();
-    // The active download must be able to clean up while retaining its file lock.
-    let data = tokio::time::timeout(Duration::from_secs(1), state.0.write())
-        .await
-        .expect("waiting request must not block active download cleanup");
-    drop(data);
     drop(active_download);
     drop(lease);
 
