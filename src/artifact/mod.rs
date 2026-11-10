@@ -5,9 +5,10 @@ use futures::{Stream, TryStreamExt};
 use opendal::Operator;
 use tokio::sync::oneshot;
 use url::Url;
+use uv_normalize::PackageName;
 
 use crate::{
-    paths::{artifact_path, valid_filename},
+    paths::{artifact_path, valid_filename, valid_index_name},
     state::State,
 };
 
@@ -26,8 +27,11 @@ impl State {
         if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Ok(File::None);
         }
-        if !valid_filename(&index)
-            || !valid_filename(&package)
+        let Ok(package) = PackageName::from_owned(package) else {
+            return Ok(File::None);
+        };
+        let package = package.to_string();
+        if !valid_index_name(&index)
             || !valid_filename(&file)
             || !self.0.read().await.indices.contains_key(&index)
         {

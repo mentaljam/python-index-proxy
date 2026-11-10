@@ -10,10 +10,11 @@ use bytes::Bytes;
 use reqwest::Client;
 use tokio::sync::Mutex;
 use url::Url;
+use uv_normalize::PackageName;
 
 use crate::{
     coordination::ResourceLimit,
-    paths::{encode_segment, valid_filename},
+    paths::{encode_segment, valid_index_name},
     settings::Upstream,
     state::State,
 };
@@ -49,9 +50,13 @@ impl State {
         package: &str,
         artifact_id: Option<&str>,
     ) -> anyhow::Result<Option<Arc<PackageDetail>>> {
-        if !valid_filename(index_slug) || !valid_filename(package) {
+        if !valid_index_name(index_slug) {
             return Ok(None);
         }
+        let Ok(package) = package.parse::<PackageName>() else {
+            return Ok(None);
+        };
+        let package = package.as_str();
         let (index_cache, http_client, base_url, url_templates) = {
             let data = self.0.read().await;
             (
@@ -201,6 +206,50 @@ fn share_refresh_result(result: &RefreshResult) -> anyhow::Result<Option<Arc<Pac
 pub(crate) struct IndexUrlTemplate(pub(crate) String);
 
 impl IndexUrlTemplate {
+    pub(crate) fn parse(template: &str) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            template.matches("{package}").count() == 1
+                && !template.replace("{package}", "").contains(['{', '}'])
+                && !template
+                    .chars()
+                    .any(|character| character.is_whitespace() || character.is_control())
+                && !template.contains('\\')
+                && template
+                    .split_once("://")
+                    .is_some_and(|(scheme, authority)| {
+                        (scheme.eq_ignore_ascii_case("http")
+                            || scheme.eq_ignore_ascii_case("https"))
+                            && !authority.is_empty()
+                            && !authority.starts_with('/')
+                    }),
+            "expected an absolute HTTP(S) URL with exactly one {{package}} placeholder and no whitespace or backslashes"
+        );
+        // The marker must not occur in credentials/query or elsewhere in the
+        // original URL when replacing its canonical serialization below.
+        let mut marker = "piprpackagemarker".to_owned();
+        while template.contains(&marker) {
+            marker.push('x');
+        }
+        let mut url: Url = template.replace("{package}", &marker).parse()?;
+        anyhow::ensure!(
+            matches!(url.scheme(), "http" | "https")
+                && url.has_host()
+                && url.fragment().is_none()
+                && url.path().contains(&marker),
+            "expected an absolute HTTP(S) URL with {{package}} in its path and no fragment"
+        );
+        if !url.path().ends_with('/') {
+            url.set_path(&format!("{}/", url.path()));
+        }
+        let marker_start = url[..url::Position::BeforePath].len()
+            + url.path().find(&marker).ok_or_else(|| {
+                anyhow::anyhow!("missing path placeholder after URL normalization")
+            })?;
+        let mut template = url.to_string();
+        template.replace_range(marker_start..marker_start + marker.len(), "{package}");
+        Ok(Self(template))
+    }
+
     fn package_url(&self, package: &str) -> Result<Url, url::ParseError> {
         self.0
             .replace("{package}", &encode_segment(package))
@@ -233,6 +282,7 @@ pub(crate) fn format_indices_list(
     indices: &HashMap<String, Vec<String>>,
 ) -> String {
     let mut list = "<!DOCTYPE html>\n<html>\n<body>".into();
+    let base_url = base_url.replace('&', "&amp;");
     for index in indices.keys() {
         list = format!("{list}\n<a href=\"{base_url}{index}/\">{index}</a><br/>");
     }

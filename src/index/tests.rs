@@ -307,3 +307,14 @@ async fn index_cache_capacity_counts_key_and_payload_bytes() {
     drop(state);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn template_placeholder_replacement_cannot_change_a_normalized_host() {
+    let template =
+        IndexUrlTemplate::parse("https://PIPRPACKAGEMARKER.example/{package}?token=private")
+            .unwrap();
+    assert_eq!(
+        template.package_url("foo-bar").unwrap().as_str(),
+        "https://piprpackagemarker.example/foo%2Dbar/?token=private",
+    );
+}

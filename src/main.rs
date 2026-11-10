@@ -44,13 +44,13 @@ async fn main() {
 }
 
 async fn serve() -> anyhow::Result<()> {
-    let settings = Settings::new()?;
-
-    let listener = TcpListener::bind(&settings.bind).await?;
-    tracing::info!("Listening on http://{}", settings.bind);
-
+    let settings = Settings::new()?.validated()?;
+    let bind = settings.bind;
     let router = get_router(&settings.base_url);
     let state: state::State = settings.try_into()?;
+
+    let listener = TcpListener::bind(bind).await?;
+    tracing::info!("Listening on http://{bind}");
 
     axum::serve(listener, router.with_state(state))
         .with_graceful_shutdown(shutdown_signal())

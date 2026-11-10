@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 pub struct Settings {
     #[serde(default = "defaults::bind")]
     pub bind: SocketAddr,
-    #[serde(default = "defaults::base_url", deserialize_with = "de::base_url")]
+    #[serde(default = "defaults::base_url")]
     pub base_url: String,
-    #[serde(default = "defaults::indices", deserialize_with = "de::indices")]
+    #[serde(default = "defaults::indices")]
     pub indices: HashMap<String, Vec<String>>,
     #[serde(default)]
     pub index_cache: Cache,
@@ -130,6 +130,24 @@ impl Default for Upstream {
 }
 
 impl Settings {
+    pub(crate) fn validated(mut self) -> anyhow::Result<Self> {
+        self.validate_resources()?;
+        self.base_url = validate_base_url(&self.base_url)?;
+        for (index, templates) in &mut self.indices {
+            anyhow::ensure!(
+                crate::paths::valid_index_name(index),
+                "indices contains an invalid name: expected ASCII alphanumeric endpoints and only letters, digits, '.', '_' or '-'"
+            );
+            for (position, template) in templates.iter_mut().enumerate() {
+                // Do not include raw URLs: they can contain credentials/query secrets.
+                *template = crate::index::IndexUrlTemplate::parse(template)
+                    .map_err(|error| anyhow::anyhow!("indices.{index}[{position}]: {error}"))?
+                    .0;
+            }
+        }
+        Ok(self)
+    }
+
     pub(crate) fn validate_resources(&self) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.index_cache.max_capacity.0 > 0,
@@ -175,50 +193,50 @@ impl Settings {
     }
 }
 
-mod de {
-    use std::collections::HashMap;
-
-    use serde::{
-        Deserialize,
-        de::{Deserializer, Error},
-    };
-
-    pub fn base_url<'de, D>(deserializer: D) -> Result<String, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let mut base_url = String::deserialize(deserializer)?;
-        let base_url: String = match base_url.chars().last() {
-            Some('/') => base_url,
-            Some(_) => {
-                base_url.push('/');
-                base_url
-            }
-            None => "/".into(),
-        };
-
-        Ok(base_url)
-    }
-
-    pub fn indices<'de, D>(deserializer: D) -> Result<HashMap<String, Vec<String>>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let mut indices = HashMap::<String, Vec<String>>::deserialize(deserializer)?;
-        for (index, urls) in indices.iter_mut() {
-            for url in urls.iter_mut() {
-                if url.is_empty() || !url.contains("{package}") {
-                    return Err(D::Error::custom(format_args!(
-                        "`indices` must be a map of index names and lists of valid URLs with \
-a `{{package}}` placeholder: found invalid URL \"{url}\" for index \"{index}\"",
-                    )));
-                } else if !url.ends_with('/') {
-                    url.push('/');
+fn validate_base_url(value: &str) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        value.starts_with('/')
+            && !value.starts_with("//")
+            && value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || b"/-._~!$&'()*+,;=:@%".contains(&byte)
+            }),
+        "base_url must be an absolute URI path prefix without a host, query, fragment or routing captures"
+    );
+    if value != "/" {
+        for segment in value.trim_end_matches('/').split('/').skip(1) {
+            let mut bytes = segment.bytes();
+            while let Some(byte) = bytes.next() {
+                if byte == b'%' {
+                    anyhow::ensure!(
+                        bytes.next().is_some_and(|byte| byte.is_ascii_hexdigit())
+                            && bytes.next().is_some_and(|byte| byte.is_ascii_hexdigit()),
+                        "base_url contains an invalid percent escape"
+                    );
                 }
             }
+            let decoded = percent_encoding::percent_decode_str(segment)
+                .decode_utf8()
+                .map_err(|_| anyhow::anyhow!("base_url contains invalid UTF-8"))?;
+            anyhow::ensure!(
+                !decoded.is_empty()
+                    && decoded != "."
+                    && decoded != ".."
+                    && !decoded.starts_with([':', '*'])
+                    && !decoded.contains(['/', '\\', '{', '}'])
+                    && !decoded.chars().any(char::is_control),
+                "base_url must contain nonempty safe path segments, without dot segments or routing captures"
+            );
         }
-        Ok(indices)
+        anyhow::ensure!(
+            !value.contains("//"),
+            "base_url must not contain empty path segments"
+        );
     }
+    Ok(if value.ends_with('/') {
+        value.to_owned()
+    } else {
+        format!("{value}/")
+    })
 }
 
 mod defaults {
@@ -289,5 +307,89 @@ mod tests {
         let mut settings = Settings::template();
         settings.limits.max_index_refreshes = usize::MAX;
         assert!(settings.validate_resources().is_err());
+    }
+
+    #[test]
+    fn validate_programmatic_settings_and_normalize_path_templates() {
+        let mut settings = Settings::template();
+        settings.base_url = "/nested/a&b/%7Eroot".into();
+        settings.indices = [(
+            "Private_1.example".into(),
+            vec!["https://user:secret@example.test/simple/{package}?token=private".into()],
+        )]
+        .into();
+        let settings = settings.validated().unwrap();
+        assert_eq!(settings.base_url, "/nested/a&b/%7Eroot/");
+        let template = &settings.indices["Private_1.example"][0];
+        assert_eq!(
+            template,
+            "https://user:secret@example.test/simple/{package}/?token=private"
+        );
+        assert!(!settings.indices.contains_key("private_1.example"));
+        // Validation also applies when bypassing deserialization entirely.
+        let mut settings = Settings::template();
+        settings.indices = [("bad/name".into(), Vec::new())].into();
+        assert!(crate::state::State::try_from(settings).is_err());
+    }
+
+    #[test]
+    fn reject_invalid_prefixes_indices_and_source_templates_without_secrets() {
+        for prefix in [
+            "",
+            "relative",
+            "https://example.test/",
+            "//example.test/",
+            "/api?x=1",
+            "/api#fragment",
+            "/api/./",
+            "/api/../",
+            "/api/%2e%2e/",
+            "/api//",
+            "/api/{capture}/",
+            "/:capture/",
+            "/*capture/",
+            "/api/%2f/",
+            "/api/%5c/",
+            "/api/%00/",
+            "/api/%ff/",
+            "/api/%zz/",
+            "/api/<tag>/",
+            "/api/ space/",
+        ] {
+            let mut settings = Settings::template();
+            settings.base_url = prefix.into();
+            assert!(settings.validated().is_err(), "accepted prefix {prefix:?}");
+        }
+        for index in [
+            "", ".", "..", "a/", "a\\b", "-start", "end_", " space", "name!", "α",
+        ] {
+            let mut settings = Settings::template();
+            settings.indices = [(index.into(), Vec::new())].into();
+            assert!(settings.validated().is_err(), "accepted index {index:?}");
+        }
+        for template in [
+            "https://user:secret@example.test/simple/",
+            "https://user:secret@example.test/{package}/{package}/",
+            "https://user:secret@example.test/{other}/{package}/",
+            "https://user:secret@example.test/?package={package}",
+            "https://user:secret@{package}.example.test/",
+            "https://user:secret@example.test/{package}/#fragment",
+            "ftp://user:secret@example.test/{package}/",
+            "https:/user:secret@example.test/{package}/",
+            "https:///example.test/{package}/",
+            "https://user:secret@/{package}/",
+            "https://user:secret@[invalid]/{package}/",
+            "https://user:secret@example.test/{package}/../",
+        ] {
+            let mut settings = Settings::template();
+            settings.indices = [("private".into(), vec![template.into()])].into();
+            let error = match settings.validated() {
+                Ok(_) => panic!("accepted invalid template"),
+                Err(error) => format!("{error:#}"),
+            };
+            assert!(error.contains("indices.private[0]"));
+            assert!(!error.contains("user:secret"));
+            assert!(!error.contains("example.test"));
+        }
     }
 }

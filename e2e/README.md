@@ -102,6 +102,14 @@ Both tools target the project's minimum Python version, 3.12.
 - Multiple sources skip 404 projects in either order. Any source's 503 causes
   HTTP 502 for page and cold artifact recovery routes, even with a healthy peer.
   After recovery the complete candidate set and both artifact bodies are returned.
+- Invalid configuration fails before binding its port, with field-specific
+  diagnostics that do not echo source credentials. Nested/percent-encoded path
+  prefixes work, including HTML escaping for ampersands.
+- Package aliases such as `Foo__..Bar` use the canonical `foo-bar` upstream,
+  page cache, artifact context and storage key without redirecting. Saved alias
+  artifact URLs also work after restart; artifact filenames remain unchanged.
+  Configured index names remain case-sensitive. Invalid names return 404
+  without upstream requests, including when an artifact is already cached.
 - A non-root `base_url`, PEP 658 metadata (and its absence), relative links after
   redirects, and query parameters exercise client compatibility.
 - A wheel with a 12 MiB payload exercises streaming and subsequent cache reads;
@@ -138,6 +146,10 @@ The attribute-selection expectations follow the
 and [file-yanking specification](https://packaging.python.org/en/latest/specifications/file-yanking/).
 Exact version pins may select yanked releases; these tests deliberately do not
 pin the candidate version.
+
+Project names are validated and canonicalized with `uv-normalize` (currently
+requiring Rust >= 1.97). Existing artifacts stored under noncanonical project
+names are left untouched; requests use the canonical key and may download again.
 
 The added scenarios exercise client selection and process/transport boundaries.
 They do not repeat Rust tests of byte weighting, malformed identifiers, parser

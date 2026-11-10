@@ -37,7 +37,7 @@ impl DetailParser {
             html: Vec::from(b"<!DOCTYPE html>\n<html>\n<body>\n"),
             anchor_start: format!(
                 r#"<a href="{}packages/{}/{}/"#,
-                base_url,
+                base_url.replace('&', "&amp;"),
                 encode_segment(index),
                 encode_segment(package)
             ),

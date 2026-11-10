@@ -24,7 +24,7 @@ impl TryFrom<Settings> for State {
     type Error = anyhow::Error;
 
     fn try_from(settings: Settings) -> Result<Self, Self::Error> {
-        settings.validate_resources()?;
+        let settings = settings.validated()?;
         let Settings {
             base_url,
             index_cache,
