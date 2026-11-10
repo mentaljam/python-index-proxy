@@ -297,18 +297,16 @@ async fn upstream_index_failures_return_bad_gateway_without_caching_partial_page
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let upstream = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        // Mixed-source HTTP behavior is covered by process e2e; keep the
+        // status/error matrix and private cache assertions here.
         let cases = [
             (vec!["404"], StatusCode::NOT_FOUND),
             (vec!["404", "404"], StatusCode::NOT_FOUND),
-            (vec!["404", "200"], StatusCode::OK),
-            (vec!["200", "404"], StatusCode::OK),
             (vec!["403"], StatusCode::BAD_GATEWAY),
             (vec!["429"], StatusCode::BAD_GATEWAY),
             (vec!["500"], StatusCode::BAD_GATEWAY),
             (vec!["503"], StatusCode::BAD_GATEWAY),
             (vec!["302"], StatusCode::BAD_GATEWAY),
-            (vec!["200", "503"], StatusCode::BAD_GATEWAY),
-            (vec!["503", "200"], StatusCode::BAD_GATEWAY),
             (vec!["body-error"], StatusCode::BAD_GATEWAY),
             (vec!["invalid-url"], StatusCode::INTERNAL_SERVER_ERROR),
         ];
@@ -324,18 +322,16 @@ async fn upstream_index_failures_return_bad_gateway_without_caching_partial_page
             )
             .await;
             assert_eq!(response.status(), expected, "sources: {sources:?}");
-            if expected != StatusCode::OK {
-                assert!(
-                    state
-                        .0
-                        .read()
-                        .await
-                        .index_cache
-                        .get("default/pkg")
-                        .await
-                        .is_none()
-                );
-            }
+            assert!(
+                state
+                    .0
+                    .read()
+                    .await
+                    .index_cache
+                    .get("default/pkg")
+                    .await
+                    .is_none()
+            );
             let response = super::get_file(
                 axum::extract::State(state.clone()),
                 Path((
@@ -346,14 +342,9 @@ async fn upstream_index_failures_return_bad_gateway_without_caching_partial_page
                 )),
             )
             .await;
-            let expected_file = if expected == StatusCode::OK {
-                StatusCode::NOT_FOUND
-            } else {
-                expected
-            };
             assert_eq!(
                 response.status(),
-                expected_file,
+                expected,
                 "cold artifact sources: {sources:?}"
             );
             drop(state);

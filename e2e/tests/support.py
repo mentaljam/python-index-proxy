@@ -289,8 +289,15 @@ class Proxy:
         "url",
     )
 
-    def __init__(
-        self, binary: Path, root: Path, upstream: Upstream, base_url: str = "/"
+    def __init__(  # noqa: PLR0913 - Explicit process, storage and source isolation options.
+        self,
+        binary: Path,
+        root: Path,
+        upstream: Upstream,
+        base_url: str = "/",
+        *,
+        storage_root: Path | None = None,
+        index_templates: tuple[str, ...] | None = None,
     ) -> None:
         self.binary = binary
         self.root = root
@@ -304,13 +311,18 @@ class Proxy:
         self.port = self.reservation.getsockname()[1]
         self.url = f"http://127.0.0.1:{self.port}{base_url}"
         self.config = root / "settings.toml"
+        templates = (
+            index_templates
+            if index_templates is not None
+            else (upstream.url + "/simple/{package}/",)
+        )
         self.config.write_text(
             f'bind = "127.0.0.1:{self.port}"\n'
             f"base_url = {json.dumps(base_url)}\n"
             "[indices]\n"
-            f'default = ["{upstream.url}/simple/{{package}}/"]\n'
+            f"default = {json.dumps(templates)}\n"
             "[storage.fs]\n"
-            f"root = {json.dumps(str(root / 'artifacts'))}\n"
+            f"root = {json.dumps(str(storage_root if storage_root is not None else root / 'artifacts'))}\n"
         )
         self.opener = build_opener(ProxyHandler({}))
 
@@ -378,7 +390,13 @@ class Proxy:
 
 
 class ProxyFactory(Protocol):
-    def __call__(self, base_url: str = "/") -> Proxy: ...
+    def __call__(
+        self,
+        base_url: str = "/",
+        *,
+        storage_root: Path | None = None,
+        index_templates: tuple[str, ...] | None = None,
+    ) -> Proxy: ...
 
 
 class Client:
