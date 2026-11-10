@@ -123,7 +123,7 @@ async fn get_detail(
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(err) => {
             tracing::error!("{err:?}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            error_status(&err).into_response()
         }
     }
 }
@@ -141,7 +141,15 @@ async fn get_file(
         Ok(File::None) => StatusCode::NOT_FOUND.into_response(),
         Err(err) => {
             tracing::error!("{err:?}");
-            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            error_status(&err).into_response()
         }
+    }
+}
+
+fn error_status(error: &anyhow::Error) -> StatusCode {
+    if error.is::<state::UpstreamIndexError>() {
+        StatusCode::BAD_GATEWAY
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
     }
 }

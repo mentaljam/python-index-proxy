@@ -1,5 +1,6 @@
 use std::{collections::HashMap, pin::Pin, sync::Arc, time::Duration};
 
+use anyhow::Context;
 use bytes::{Bytes, BytesMut};
 use futures::{Stream, TryStreamExt};
 use moka::future::Cache;
@@ -16,6 +17,15 @@ use crate::settings::Settings;
 const CHUNK_SIZE: usize = 5 * 1024 * 1024;
 const CHUNK_BUFFER_SIZE: usize = CHUNK_SIZE + 512 * 1024;
 // const VND_PYPI_SIMPLE_V1_JSON: &str = "application/vnd.pypi.simple.v1+json";
+
+#[derive(Debug)]
+pub struct UpstreamIndexError;
+
+impl std::fmt::Display for UpstreamIndexError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Failed to fetch upstream package index")
+    }
+}
 
 #[derive(Clone)]
 pub struct State(Arc<RwLock<StateData>>);
@@ -68,13 +78,22 @@ impl State {
             let response = http_client
                 .get(template.package_url(package)?)
                 .send()
-                .await?;
-            if response.status().is_success() {
-                let final_url = response.url().clone();
-                parser
-                    .parse_html(&final_url, response.bytes().await?)
-                    .await?;
+                .await
+                .context(UpstreamIndexError)?;
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                continue;
             }
+            if !response.status().is_success() {
+                return Err(anyhow::anyhow!(
+                    "Upstream index {} returned {}",
+                    response.url(),
+                    response.status()
+                )
+                .context(UpstreamIndexError));
+            }
+            let final_url = response.url().clone();
+            let content = response.bytes().await.context(UpstreamIndexError)?;
+            parser.parse_html(&final_url, content).await?;
         }
         let detail = parser.finalize().map(Arc::new);
         if let Some(detail) = &detail {
@@ -657,6 +676,204 @@ fn format_indices_list(base_url: &str, indices: &HashMap<String, Vec<String>>) -
 mod storage_tests {
     use super::*;
     use futures::TryStreamExt;
+
+    fn index_failure_state(sources: Vec<String>) -> (State, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "pipr-index-failure-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let mut settings = Settings::template();
+        settings.indices = [("default".into(), sources)].into();
+        let mut config = opendal::services::FsConfig::default();
+        config.root = Some(root.to_str().unwrap().into());
+        settings.storage = crate::storage::Storage::Fs(config);
+        (State::try_from(settings).unwrap(), root)
+    }
+
+    #[tokio::test]
+    async fn upstream_index_failures_return_bad_gateway_without_caching_partial_pages() {
+        use axum::{extract::Path, http::StatusCode, response::IntoResponse, routing::get};
+        use std::sync::atomic::{AtomicU16, Ordering};
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let recovering_status = Arc::new(AtomicU16::new(503));
+            let app = axum::Router::new().route(
+                "/{source}/{package}/",
+                get({
+                    let recovering_status = recovering_status.clone();
+                    move |Path((source, _)): Path<(String, String)>| {
+                        let recovering_status = recovering_status.clone();
+                        async move {
+                            if source == "body-error" {
+                                return axum::body::Body::from_stream(futures::stream::iter([
+                                    Err::<Bytes, _>(std::io::Error::other(
+                                        "upstream body interrupted",
+                                    )),
+                                ]))
+                                .into_response();
+                            }
+                            if source == "parse-error" {
+                                return "<a href=unquoted.whl>invalid XML</a>".into_response();
+                            }
+                            let code = if source == "recover" {
+                                recovering_status.load(Ordering::SeqCst)
+                            } else {
+                                source.parse().unwrap()
+                            };
+                            let status = StatusCode::from_u16(code).unwrap();
+                            (status, format!("<a href='{source}.whl'>{source}.whl</a>"))
+                                .into_response()
+                        }
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let upstream = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let cases = [
+                (vec!["404"], StatusCode::NOT_FOUND),
+                (vec!["404", "404"], StatusCode::NOT_FOUND),
+                (vec!["404", "200"], StatusCode::OK),
+                (vec!["200", "404"], StatusCode::OK),
+                (vec!["403"], StatusCode::BAD_GATEWAY),
+                (vec!["429"], StatusCode::BAD_GATEWAY),
+                (vec!["500"], StatusCode::BAD_GATEWAY),
+                (vec!["503"], StatusCode::BAD_GATEWAY),
+                (vec!["302"], StatusCode::BAD_GATEWAY),
+                (vec!["200", "503"], StatusCode::BAD_GATEWAY),
+                (vec!["503", "200"], StatusCode::BAD_GATEWAY),
+                (vec!["body-error"], StatusCode::BAD_GATEWAY),
+                (vec!["parse-error"], StatusCode::INTERNAL_SERVER_ERROR),
+            ];
+            for (sources, expected) in cases {
+                let urls = sources
+                    .iter()
+                    .map(|source| format!("{endpoint}/{source}/{{package}}/"))
+                    .collect();
+                let (state, root) = index_failure_state(urls);
+                let response = crate::get_detail(
+                    axum::extract::State(state.clone()),
+                    Path(("default".into(), "pkg".into())),
+                )
+                .await;
+                assert_eq!(response.status(), expected, "sources: {sources:?}");
+                if expected != StatusCode::OK {
+                    assert!(
+                        state
+                            .0
+                            .read()
+                            .await
+                            .index_cache
+                            .get("default/pkg")
+                            .await
+                            .is_none()
+                    );
+                }
+                let response = crate::get_file(
+                    axum::extract::State(state.clone()),
+                    Path((
+                        "default".into(),
+                        "pkg".into(),
+                        "a".repeat(64),
+                        "file.whl".into(),
+                    )),
+                )
+                .await;
+                let expected_file = if expected == StatusCode::OK {
+                    StatusCode::NOT_FOUND
+                } else {
+                    expected
+                };
+                assert_eq!(
+                    response.status(),
+                    expected_file,
+                    "cold artifact sources: {sources:?}"
+                );
+                drop(state);
+                std::fs::remove_dir_all(root).unwrap();
+            }
+
+            let (state, root) = index_failure_state(vec![
+                format!("{endpoint}/200/{{package}}/"),
+                format!("{endpoint}/recover/{{package}}/"),
+            ]);
+            assert!(
+                state
+                    .get_detail("default".into(), "pkg".into())
+                    .await
+                    .is_err()
+            );
+            assert!(
+                state
+                    .0
+                    .read()
+                    .await
+                    .index_cache
+                    .get("default/pkg")
+                    .await
+                    .is_none()
+            );
+            recovering_status.store(200, Ordering::SeqCst);
+            let detail = state
+                .package_detail("default", "pkg", None)
+                .await
+                .unwrap()
+                .unwrap();
+            let mut filenames: Vec<_> = detail
+                .files
+                .values()
+                .map(|file| file.filename.as_str())
+                .collect();
+            filenames.sort();
+            assert_eq!(filenames, ["200.whl", "recover.whl"]);
+            assert!(
+                state
+                    .0
+                    .read()
+                    .await
+                    .index_cache
+                    .get("default/pkg")
+                    .await
+                    .is_some()
+            );
+            drop(state);
+            upstream.abort();
+            std::fs::remove_dir_all(root).unwrap();
+        })
+        .await
+        .expect("upstream index failure matrix must complete");
+    }
+
+    #[tokio::test]
+    async fn upstream_connection_failure_is_bad_gateway_for_index_and_artifact() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let (state, root) = index_failure_state(vec![format!("{endpoint}/{{package}}/")]);
+        let index = crate::get_detail(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(("default".into(), "pkg".into())),
+        )
+        .await;
+        assert_eq!(index.status(), axum::http::StatusCode::BAD_GATEWAY);
+        let file = crate::get_file(
+            axum::extract::State(state.clone()),
+            axum::extract::Path((
+                "default".into(),
+                "pkg".into(),
+                "a".repeat(64),
+                "file.whl".into(),
+            )),
+        )
+        .await;
+        assert_eq!(file.status(), axum::http::StatusCode::BAD_GATEWAY);
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn page(html: &'static [u8]) -> Arc<PackageDetail> {
         Arc::new(PackageDetail {

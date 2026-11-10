@@ -149,11 +149,5 @@ This suite covers filesystem storage and HTML indexes. It does not qualify real
 S3/presigned redirects, other cloud backends, distributed fill coordination,
 Kubernetes, sdist builds, or installation from public indexes.
 
-Additional expected failures in `test_resilience.py`:
-
-- `test_upstream_unavailability_is_not_package_absence`: a sole upstream's 503
-  currently becomes proxy 404 instead of a server error. The recovery assertion
-  follows this status assertion and will become reachable once it is fixed.
-
-These failures describe application behavior to fix later. The tests contain no
-`xfail` markers and application source is not changed by this test addition.
+The HTML5 failures describe application behavior to fix later. The tests contain no
+`xfail` markers.
