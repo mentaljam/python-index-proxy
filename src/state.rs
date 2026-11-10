@@ -138,9 +138,13 @@ impl State {
         }
 
         let data = self.0.read().await;
-        if data.storage.stat(&object_path).await.is_ok() {
-            tracing::debug!("serving cached {file}");
-            return cached_file(&data.storage, &object_path).await;
+        match data.storage.stat(&object_path).await {
+            Ok(_) => {
+                tracing::debug!("serving cached {file}");
+                return cached_file(&data.storage, &object_path).await;
+            }
+            Err(err) if err.kind() == opendal::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
         }
 
         let http_client = data.http_client.clone();
@@ -726,6 +730,257 @@ fn format_indices_list(base_url: &str, indices: &HashMap<String, Vec<String>>) -
 mod storage_tests {
     use super::*;
     use futures::TryStreamExt;
+
+    #[derive(Debug, Clone)]
+    struct StatFailureLayer {
+        failure: Arc<std::sync::Mutex<Option<opendal::ErrorKind>>>,
+        writes: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl opendal::raw::Layer for StatFailureLayer {
+        fn apply_service(&self, inner: opendal::raw::Servicer) -> opendal::raw::Servicer {
+            Arc::new(StatFailureService {
+                inner,
+                controls: self.clone(),
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct StatFailureService {
+        inner: opendal::raw::Servicer,
+        controls: StatFailureLayer,
+    }
+
+    impl opendal::raw::Service for StatFailureService {
+        type Reader = opendal::raw::oio::Reader;
+        type Writer = opendal::raw::oio::Writer;
+        type Lister = opendal::raw::oio::Lister;
+        type Deleter = opendal::raw::oio::Deleter;
+        type Copier = opendal::raw::oio::Copier;
+
+        fn info(&self) -> opendal::raw::ServiceInfo {
+            self.inner.info()
+        }
+
+        fn capability(&self) -> opendal::Capability {
+            self.inner.capability()
+        }
+
+        async fn stat(
+            &self,
+            ctx: &opendal::OperationContext,
+            path: &str,
+            args: opendal::raw::OpStat,
+        ) -> opendal::Result<opendal::raw::RpStat> {
+            if let Some(kind) = *self.controls.failure.lock().unwrap() {
+                return Err(opendal::Error::new(kind, "injected artifact stat failure"));
+            }
+            self.inner.stat(ctx, path, args).await
+        }
+
+        async fn create_dir(
+            &self,
+            ctx: &opendal::OperationContext,
+            path: &str,
+            args: opendal::raw::OpCreateDir,
+        ) -> opendal::Result<opendal::raw::RpCreateDir> {
+            self.inner.create_dir(ctx, path, args).await
+        }
+
+        fn read(
+            &self,
+            ctx: &opendal::OperationContext,
+            path: &str,
+            args: opendal::raw::OpRead,
+        ) -> opendal::Result<Self::Reader> {
+            self.inner.read(ctx, path, args)
+        }
+
+        fn write(
+            &self,
+            ctx: &opendal::OperationContext,
+            path: &str,
+            args: opendal::raw::OpWrite,
+        ) -> opendal::Result<Self::Writer> {
+            self.controls
+                .writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.write(ctx, path, args)
+        }
+
+        fn delete(&self, ctx: &opendal::OperationContext) -> opendal::Result<Self::Deleter> {
+            self.inner.delete(ctx)
+        }
+
+        fn list(
+            &self,
+            ctx: &opendal::OperationContext,
+            path: &str,
+            args: opendal::raw::OpList,
+        ) -> opendal::Result<Self::Lister> {
+            self.inner.list(ctx, path, args)
+        }
+
+        fn copy(
+            &self,
+            ctx: &opendal::OperationContext,
+            from: &str,
+            to: &str,
+            args: opendal::raw::OpCopy,
+            opts: opendal::raw::OpCopier,
+        ) -> opendal::Result<Self::Copier> {
+            self.inner.copy(ctx, from, to, args, opts)
+        }
+
+        async fn rename(
+            &self,
+            ctx: &opendal::OperationContext,
+            from: &str,
+            to: &str,
+            args: opendal::raw::OpRename,
+        ) -> opendal::Result<opendal::raw::RpRename> {
+            self.inner.rename(ctx, from, to, args).await
+        }
+
+        async fn presign(
+            &self,
+            ctx: &opendal::OperationContext,
+            path: &str,
+            args: opendal::raw::OpPresign,
+        ) -> opendal::Result<opendal::raw::RpPresign> {
+            self.inner.presign(ctx, path, args).await
+        }
+    }
+
+    #[tokio::test]
+    async fn artifact_stat_errors_do_not_trigger_upstream_or_cache_writes() {
+        use axum::{http::StatusCode, response::IntoResponse, routing::get};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let requests = Arc::new(AtomicUsize::new(0));
+            let app = axum::Router::new().route(
+                "/{*path}",
+                get({
+                    let requests = requests.clone();
+                    move |uri: axum::http::Uri| {
+                        let requests = requests.clone();
+                        async move {
+                            requests.fetch_add(1, Ordering::SeqCst);
+                            if uri.path() == "/simple/pkg/" {
+                                "<a href='/files/pkg.whl'>pkg.whl</a>".into_response()
+                            } else {
+                                b"complete wheel".as_slice().into_response()
+                            }
+                        }
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let upstream = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let (state, root) =
+                index_failure_state(vec![format!("{endpoint}/simple/{{package}}/")]);
+            let controls = StatFailureLayer {
+                failure: Arc::new(std::sync::Mutex::new(None)),
+                writes: Arc::new(AtomicUsize::new(0)),
+            };
+            {
+                let mut data = state.0.write().await;
+                data.storage = data.storage.clone().layer(controls.clone());
+            }
+            let unknown_id = "0".repeat(64);
+            for kind in [
+                opendal::ErrorKind::PermissionDenied,
+                opendal::ErrorKind::Unexpected,
+            ] {
+                *controls.failure.lock().unwrap() = Some(kind);
+                let error = match state
+                    .get_file(
+                        "default".into(),
+                        "pkg".into(),
+                        unknown_id.clone(),
+                        "pkg.whl".into(),
+                    )
+                    .await
+                {
+                    Err(error) => error,
+                    Ok(_) => panic!("storage failure must propagate"),
+                };
+                assert_eq!(error.downcast_ref::<opendal::Error>().unwrap().kind(), kind);
+                let response = crate::get_file(
+                    axum::extract::State(state.clone()),
+                    axum::extract::Path((
+                        "default".into(),
+                        "pkg".into(),
+                        unknown_id.clone(),
+                        "pkg.whl".into(),
+                    )),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+                assert_eq!(
+                    requests.load(Ordering::SeqCst),
+                    0,
+                    "storage errors must not contact upstream"
+                );
+                assert_eq!(
+                    controls.writes.load(Ordering::SeqCst),
+                    0,
+                    "storage errors must not attempt writes"
+                );
+                let data = state.0.read().await;
+                assert!(data.index_cache.get("default/pkg").await.is_none());
+                assert!(data.download_locks.is_empty());
+            }
+            *controls.failure.lock().unwrap() = None;
+            let html = state
+                .get_detail("default".into(), "pkg".into())
+                .await
+                .unwrap()
+                .unwrap();
+            let html = std::str::from_utf8(&html).unwrap();
+            let href = html
+                .split("href=\"")
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap();
+            let id = href.split('/').nth(4).unwrap().to_owned();
+            state.0.read().await.index_cache.invalidate_all();
+            let File::Bytes(bytes) = state
+                .get_file("default".into(), "pkg".into(), id.clone(), "pkg.whl".into())
+                .await
+                .unwrap()
+            else {
+                panic!("NotFound must fill storage");
+            };
+            assert_eq!(bytes, b"complete wheel".as_slice());
+            assert_eq!(requests.load(Ordering::SeqCst), 3);
+            assert_eq!(controls.writes.load(Ordering::SeqCst), 1);
+            state.0.read().await.index_cache.invalidate_all();
+            let File::Stream(stream) = state
+                .get_file("default".into(), "pkg".into(), id, "pkg.whl".into())
+                .await
+                .unwrap()
+            else {
+                panic!("existing artifact must stream from storage");
+            };
+            assert_eq!(
+                stream.try_collect::<Vec<_>>().await.unwrap().concat(),
+                b"complete wheel"
+            );
+            assert_eq!(requests.load(Ordering::SeqCst), 3);
+            assert_eq!(controls.writes.load(Ordering::SeqCst), 1);
+            upstream.abort();
+            drop(state);
+            std::fs::remove_dir_all(root).unwrap();
+        })
+        .await
+        .expect("storage error handling must complete");
+    }
 
     fn index_failure_state(sources: Vec<String>) -> (State, std::path::PathBuf) {
         let root = std::env::temp_dir().join(format!(
