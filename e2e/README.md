@@ -137,17 +137,16 @@ finalizers. Failures include client output, proxy logs and upstream requests.
 pytest temporary directories retain `settings.toml`, `proxy.log`, artifacts and
 client environments for inspection, subject to pytest's temporary-file retention.
 
-## Known failures
+## Verification boundary
 
-`test_html5_unquoted_href[pip]` and `test_html5_unquoted_href[uv]` currently fail.
-The same fixture installs directly with both clients, but the proxy returns HTTP
-500 because its XML parser requires quotes around attribute values. The tests
-expect installation to succeed; they are intentionally neither skipped nor
-marked `xfail`. Proxy implementation changes are outside this test addition.
+The proxy uses html5gum to extract anchors without a DOM. Rust tests cover
+raw-text/RCDATA contexts and adjacent or unterminated anchors; this does not
+claim browser-equivalent tree construction for arbitrary malformed documents.
+
+The HTML5 unquoted-href cases are expected to pass through the proxy, as do
+installation, cancellation cleanup, and upstream error-classification scenarios.
+Tests keep assertions on expected behavior and do not use `xfail` markers.
 
 This suite covers filesystem storage and HTML indexes. It does not qualify real
 S3/presigned redirects, other cloud backends, distributed fill coordination,
 Kubernetes, sdist builds, or installation from public indexes.
-
-The HTML5 failures describe application behavior to fix later. The tests contain no
-`xfail` markers.

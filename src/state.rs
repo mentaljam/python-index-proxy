@@ -3,10 +3,10 @@ use std::{collections::HashMap, pin::Pin, sync::Arc, time::Duration};
 use anyhow::Context;
 use bytes::{Bytes, BytesMut};
 use futures::{Stream, TryStreamExt};
+use html5gum::{DefaultEmitter, StartTag, State as HtmlState, Token, Tokenizer};
 use moka::future::Cache;
 use opendal::Operator;
 use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
-use quick_xml::{events::Event, reader::Reader as XmlReader};
 use reqwest::Client;
 use sha2::{Digest, Sha256};
 use tokio::sync::{RwLock, mpsc, oneshot};
@@ -93,7 +93,12 @@ impl State {
             }
             let final_url = response.url().clone();
             let content = response.bytes().await.context(UpstreamIndexError)?;
-            parser.parse_html(&final_url, content).await?;
+            // Parsing is CPU-bound and must not monopolize an async worker.
+            parser = tokio::task::spawn_blocking(move || {
+                parser.parse_html(&final_url, &content)?;
+                Ok::<_, anyhow::Error>(parser)
+            })
+            .await??;
         }
         let detail = parser.finalize().map(Arc::new);
         if let Some(detail) = &detail {
@@ -474,11 +479,23 @@ impl IndexUrlTemplate {
     }
 }
 
+enum AnchorState {
+    Outside,
+    Inside(PendingAnchor),
+}
+
+struct PendingAnchor {
+    id: String,
+    source: ArtifactSource,
+    fragment: Option<String>,
+    attributes: Vec<(String, String)>,
+    text: String,
+}
+
 struct DetailParser {
     file_links: HashMap<String, ArtifactSource>,
     link_count: usize,
     html: Vec<u8>,
-    buf: Vec<u8>,
     anchor_start: String,
 }
 
@@ -488,7 +505,6 @@ impl DetailParser {
             file_links: HashMap::new(),
             link_count: 0,
             html: Vec::from(b"<!DOCTYPE html>\n<html>\n<body>\n"),
-            buf: Vec::new(),
             anchor_start: format!(
                 r#"<a href="{}packages/{}/{}/"#,
                 base_url,
@@ -498,92 +514,108 @@ impl DetailParser {
         }
     }
 
-    async fn parse_html(&mut self, package_url: &Url, content: Bytes) -> anyhow::Result<()> {
-        let Self {
-            file_links,
-            link_count,
-            html,
-            buf,
-            anchor_start,
-        } = self;
-
-        let mut reader = XmlReader::from_reader(&*content);
-        reader.config_mut().trim_text(true);
-        reader.config_mut().check_end_names = false;
-        let mut in_a = false;
-
-        loop {
-            match reader.read_event_into_async(buf).await? {
-                Event::Start(e) if e.name().as_ref() == "a" => {
-                    in_a = true;
-                    if let Some(href) = e.try_get_attribute("href")? {
-                        let href_value =
-                            href.normalized_value(quick_xml::XmlVersion::Implicit1_0)?;
-                        let mut source_url = package_url.join(&href_value)?;
-                        let hex = hex::encode(Sha256::digest(source_url.as_str().as_bytes()));
-                        let fragment = source_url.fragment().map(str::to_owned);
-                        source_url.set_fragment(None);
-                        let file = source_url
-                            .path_segments()
-                            .and_then(|mut parts| parts.next_back())
-                            .unwrap_or("");
-                        let filename = percent_decode_str(file).decode_utf8()?.into_owned();
-                        if valid_filename(&filename) {
-                            let attributes = e.attributes().filter(|a| {
-                                a.as_ref()
-                                    .map(|a| a.key.as_ref() != "href")
-                                    .unwrap_or(false)
-                            });
-
-                            html.extend(anchor_start.as_bytes());
-                            html.extend(hex.as_bytes());
-                            html.push(b'/');
-                            html.extend(encode_segment(&filename).as_bytes());
-                            if let Some(fragment) = fragment {
-                                html.push(b'#');
-                                html.extend(quick_xml::escape::escape(&fragment).as_bytes());
-                            }
-                            html.push(b'"');
-                            for attr in attributes {
-                                let attr = attr?;
-                                html.push(b' ');
-                                html.extend(attr.key.as_ref().as_bytes());
-                                html.extend(br#"=""#);
-                                html.extend(attr.value.as_bytes());
-                                html.push(b'"');
-                            }
-                            html.push(b'>');
-
-                            file_links.insert(
-                                hex,
-                                ArtifactSource {
-                                    url: source_url.to_string(),
-                                    filename,
-                                },
-                            );
-                            *link_count += 1;
-                        }
+    fn parse_html(&mut self, package_url: &Url, content: &[u8]) -> anyhow::Result<()> {
+        // Context-aware tokenization keeps apparent tags inside script/style and
+        // RCDATA elements as text without constructing a DOM.
+        let mut emitter = DefaultEmitter::default();
+        emitter.naively_switch_states(true);
+        let mut state = AnchorState::Outside;
+        let mut tokenizer = Tokenizer::new_with_emitter(std::str::from_utf8(content)?, emitter);
+        while let Some(token) = tokenizer.next() {
+            match token? {
+                Token::StartTag(tag) if tag.name.as_ref() == b"a" => {
+                    self.finish_anchor(&mut state);
+                    state = match Self::prepare_anchor(package_url, tag)? {
+                        Some(anchor) => AnchorState::Inside(anchor),
+                        None => AnchorState::Outside,
+                    };
+                }
+                Token::EndTag(tag) if tag.name.as_ref() == b"a" => {
+                    self.finish_anchor(&mut state);
+                }
+                Token::String(text) => {
+                    if let AnchorState::Inside(anchor) = &mut state {
+                        anchor.text.push_str(std::str::from_utf8(&text)?);
                     }
                 }
-                Event::End(e) if in_a && e.name().as_ref() == "a" => {
-                    in_a = false;
-                    html.extend(b"</a><br/>\n");
+                Token::StartTag(tag) if tag.name.as_ref() == b"noframes" => {
+                    // html5gum 0.9.1 naive_next_state spells this tag "noframe".
+                    tokenizer.set_state(HtmlState::RawText);
                 }
-                Event::Text(text) if in_a => {
-                    html.extend(text.as_bytes());
-                }
-                Event::GeneralRef(reference) if in_a => {
-                    html.push(b'&');
-                    html.extend(reference.as_bytes());
-                    html.push(b';');
-                }
-                Event::Eof => break,
-                _ => (),
+                // HTML parse errors are recoverable diagnostics, not reader errors.
+                _ => {}
             }
-            buf.clear();
         }
-
+        self.finish_anchor(&mut state);
         Ok(())
+    }
+
+    fn prepare_anchor(
+        package_url: &Url,
+        tag: StartTag<()>,
+    ) -> anyhow::Result<Option<PendingAnchor>> {
+        let Some(href) = tag.attributes.get(b"href".as_slice()) else {
+            return Ok(None);
+        };
+        let mut source_url = package_url.join(std::str::from_utf8(href)?)?;
+        let id = hex::encode(Sha256::digest(source_url.as_str().as_bytes()));
+        let fragment = source_url.fragment().map(str::to_owned);
+        source_url.set_fragment(None);
+        let file = source_url
+            .path_segments()
+            .and_then(|mut parts| parts.next_back())
+            .unwrap_or("");
+        let filename = percent_decode_str(file).decode_utf8()?.into_owned();
+        if !valid_filename(&filename) {
+            return Ok(None);
+        }
+        let mut attributes = Vec::new();
+        for (name, value) in &tag.attributes {
+            if name.as_ref() != b"href" {
+                attributes.push((
+                    std::str::from_utf8(name)?.to_owned(),
+                    std::str::from_utf8(value)?.to_owned(),
+                ));
+            }
+        }
+        Ok(Some(PendingAnchor {
+            id,
+            source: ArtifactSource {
+                url: source_url.to_string(),
+                filename,
+            },
+            fragment,
+            attributes,
+            text: String::new(),
+        }))
+    }
+
+    fn finish_anchor(&mut self, state: &mut AnchorState) {
+        let AnchorState::Inside(anchor) = std::mem::replace(state, AnchorState::Outside) else {
+            return;
+        };
+        self.html.extend(self.anchor_start.as_bytes());
+        self.html.extend(anchor.id.as_bytes());
+        self.html.push(b'/');
+        self.html
+            .extend(encode_segment(&anchor.source.filename).as_bytes());
+        if let Some(fragment) = anchor.fragment {
+            self.html.push(b'#');
+            append_html_escaped(&mut self.html, &fragment);
+        }
+        self.html.push(b'"');
+        for (name, value) in anchor.attributes {
+            self.html.push(b' ');
+            append_html_escaped(&mut self.html, &name);
+            self.html.extend(b"=\"");
+            append_html_escaped(&mut self.html, &value);
+            self.html.push(b'"');
+        }
+        self.html.push(b'>');
+        append_html_escaped(&mut self.html, &anchor.text);
+        self.html.extend(b"</a><br/>\n");
+        self.file_links.insert(anchor.id, anchor.source);
+        self.link_count += 1;
     }
 
     fn finalize(self) -> Option<PackageDetail> {
@@ -621,6 +653,24 @@ impl BufferedResponseReader {
         } else {
             Ok(Some(buf.into()))
         }
+    }
+}
+
+fn append_html_escaped(output: &mut Vec<u8>, text: &str) {
+    for character in text.chars() {
+        let escaped = match character {
+            '&' => "&amp;",
+            '<' => "&lt;",
+            '>' => "&gt;",
+            '"' => "&quot;",
+            '\'' => "&#39;",
+            _ => {
+                let mut bytes = [0; 4];
+                output.extend(character.encode_utf8(&mut bytes).as_bytes());
+                continue;
+            }
+        };
+        output.extend(escaped.as_bytes());
     }
 }
 
@@ -716,8 +766,9 @@ mod storage_tests {
                                 ]))
                                 .into_response();
                             }
-                            if source == "parse-error" {
-                                return "<a href=unquoted.whl>invalid XML</a>".into_response();
+                            if source == "invalid-url" {
+                                return "<a href=\"http://[invalid\">invalid URL</a>"
+                                    .into_response();
                             }
                             let code = if source == "recover" {
                                 recovering_status.load(Ordering::SeqCst)
@@ -747,7 +798,7 @@ mod storage_tests {
                 (vec!["200", "503"], StatusCode::BAD_GATEWAY),
                 (vec!["503", "200"], StatusCode::BAD_GATEWAY),
                 (vec!["body-error"], StatusCode::BAD_GATEWAY),
-                (vec!["parse-error"], StatusCode::INTERNAL_SERVER_ERROR),
+                (vec!["invalid-url"], StatusCode::INTERNAL_SERVER_ERROR),
             ];
             for (sources, expected) in cases {
                 let urls = sources
@@ -1144,11 +1195,111 @@ mod storage_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
-    #[tokio::test]
-    async fn rewritten_file_links_preserve_fragments_and_resolve_sources() {
+    #[test]
+    fn html5_links_preserve_decoded_attributes_text_and_source_urls() {
+        let base = Url::parse("https://index.example/simple/pkg/").unwrap();
+        let mut parser = DetailParser::new("/proxy/", "default", "pkg");
+        parser
+            .parse_html(
+                &base,
+                br#"<!doctype html><HTML><HEAD>
+            <meta charset=utf-8><TITLE>Packages</TITLE></HEAD><BODY>
+            <A HREF=first.whl DATA-REQUIRES-PYTHON='&gt;=3.12' DATA-YANKED
+               DATA-CORE-METADATA='sha256=abc' DATA-DIST-INFO-METADATA='sha256=abc'
+               TITLE='a &quot;quote&quot; &amp; &lt;tag&gt;'>first<span>.whl</span></A><br>
+            <a>not a file</a>
+            <a href='second.whl?x=1&amp;y=2#sha256=ab&amp;extra=cd'>second&#46;whl &amp; &lt;tag&gt;
+            "#,
+            )
+            .unwrap();
+        let detail = parser.finalize().unwrap();
+        assert_eq!(detail.files.len(), 2);
+        let html = std::str::from_utf8(&detail.html).unwrap();
+        assert!(html.contains("data-requires-python=\"&gt;=3.12\""));
+        assert!(html.contains("data-yanked=\"\""));
+        assert!(html.contains("data-core-metadata=\"sha256=abc\""));
+        assert!(html.contains("data-dist-info-metadata=\"sha256=abc\""));
+        assert!(html.contains("title=\"a &quot;quote&quot; &amp; &lt;tag&gt;\""));
+        assert!(html.contains(">first.whl</a>"));
+        assert!(html.contains(">second.whl &amp; &lt;tag&gt;"));
+        assert!(html.contains("/second%2Ewhl#sha256=ab&amp;extra=cd\""));
+        assert!(!html.contains("not a file"));
+        let mut urls: Vec<_> = detail
+            .files
+            .values()
+            .map(|source| source.url.as_str())
+            .collect();
+        urls.sort();
+        assert_eq!(
+            urls,
+            [
+                "https://index.example/simple/pkg/first.whl",
+                "https://index.example/simple/pkg/second.whl?x=1&y=2",
+            ]
+        );
+    }
+
+    #[test]
+    fn tokenizer_ignores_apparent_links_in_raw_text_and_rcdata() {
+        let base = Url::parse("https://index.example/simple/pkg/").unwrap();
+        for tag in [
+            "script", "style", "title", "textarea", "iframe", "xmp", "noembed", "noframes",
+        ] {
+            let mut parser = DetailParser::new("/", "default", "pkg");
+            let input = format!(
+                "<{tag}><a href=fake.whl>fake.whl</a></{tag}><a href=real.whl>real.whl</a>"
+            );
+            parser.parse_html(&base, input.as_bytes()).unwrap();
+            let detail = parser.finalize().unwrap();
+            assert_eq!(detail.files.len(), 1, "{tag}");
+            let source = detail.files.values().next().unwrap();
+            assert_eq!(
+                source.url, "https://index.example/simple/pkg/real.whl",
+                "{tag}"
+            );
+            let html = std::str::from_utf8(&detail.html).unwrap();
+            assert!(html.contains(">real.whl</a>"), "{tag}");
+            assert!(!html.contains("fake.whl"), "{tag}");
+        }
+    }
+
+    #[test]
+    fn tokenizer_closes_adjacent_and_unterminated_anchors() {
+        let base = Url::parse("https://index.example/simple/pkg/").unwrap();
+        let mut parser = DetailParser::new("/", "default", "pkg");
+        parser.parse_html(&base,
+            b"<a href=first.whl>first<span>.whl</span><a href=second.whl>second.whl<a>not a file</a><a href=last.whl>last.whl"
+        ).unwrap();
+        let detail = parser.finalize().unwrap();
+        assert_eq!(detail.files.len(), 3);
+        let html = std::str::from_utf8(&detail.html).unwrap();
+        for filename in ["first.whl", "second.whl", "last.whl"] {
+            assert!(html.contains(&format!(">{filename}</a><br/>")), "{html}");
+        }
+        assert_eq!(html.matches("</a>").count(), 3);
+        assert!(!html.contains("not a file"));
+    }
+
+    #[test]
+    fn ignored_anchor_targets_end_the_previous_link_without_leaking_text() {
+        let base = Url::parse("https://index.example/simple/pkg/").unwrap();
+        let mut parser = DetailParser::new("/", "default", "pkg");
+        parser.parse_html(&base, b"outside</a><a href=first.whl>first.whl<a href=directory/>ignored</a>outside<a href=last.whl>last.whl</a>outside").unwrap();
+        let detail = parser.finalize().unwrap();
+        let html = std::str::from_utf8(&detail.html).unwrap();
+        assert_eq!(detail.files.len(), 2);
+        assert!(html.contains(">first.whl</a><br/>"));
+        assert!(html.contains(">last.whl</a><br/>"));
+        assert_eq!(html.matches("</a>").count(), 2);
+        assert!(!html.contains("outside"));
+        assert!(!html.contains("ignored"));
+    }
+
+    #[test]
+    fn rewritten_file_links_preserve_fragments_and_resolve_sources() {
         let base = Url::parse("https://index.example.test/simple/pkg/").unwrap();
         let mut parser = DetailParser::new("/proxy/", "default", "pkg");
-        parser.parse_html(&base, Bytes::from_static(b"<a href='../../files/pkg.whl?download=1&amp;x=2#sha256=abc'>pkg.whl</a><a href='plain.zip'>plain.zip</a>")).await.unwrap();
+        parser.parse_html(&base, b"<a href='../../files/pkg.whl?download=1&amp;x=2#sha256=abc'>pkg.whl</a><a href='plain.zip'>plain.zip</a>").unwrap();
         let detail = parser.finalize().unwrap();
         let html = std::str::from_utf8(&detail.html).unwrap();
         assert!(html.contains("/proxy/packages/default/pkg/"));
@@ -1167,9 +1318,8 @@ mod storage_tests {
         other
             .parse_html(
                 &Url::parse("https://other.example/simple/pkg/").unwrap(),
-                Bytes::from_static(b"<a href='plain.zip'>plain.zip</a>"),
+                b"<a href='plain.zip'>plain.zip</a>",
             )
-            .await
             .unwrap();
         let other = other.finalize().unwrap();
         let first_id = detail
