@@ -8,7 +8,7 @@ use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode
 use quick_xml::{events::Event, reader::Reader as XmlReader};
 use reqwest::Client;
 use sha2::{Digest, Sha256};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, mpsc, oneshot};
 use url::Url;
 
 use crate::settings::Settings;
@@ -148,83 +148,205 @@ impl State {
             })
             .to_owned();
 
-        let file_lock = self
-            .0
-            .write()
-            .await
-            .download_locks
-            .entry(hash.clone())
-            .or_default()
-            .clone();
+        let (reply, result) = oneshot::channel();
+        let state = self.0.clone();
+        tokio::spawn(async move {
+            download_response(state, hash, object_path, content_type, response, reply).await;
+        });
+        result.await?
+    }
+}
 
-        tracing::debug!("downloading {file}");
-        let mut buffered_reader = BufferedResponseReader(response);
-        let buf = match buffered_reader.chunk().await {
-            Ok(Some(buf)) if buf.len() < CHUNK_SIZE - 1 => {
-                let _file_write_guard = file_lock.write().await;
-                let storage = self.0.read().await.storage.clone();
-                let result = storage.write(&object_path, buf.clone()).await;
-                remove_download_lock(&self.0, &hash, &file_lock).await;
-                result?;
-                return Ok(File::Bytes(buf));
+// The task owns the writer until close/abort completes. Dropping an HTTP body only
+// closes its receiver; it never cancels an in-flight OpenDAL write operation.
+async fn download_response(
+    state: Arc<RwLock<StateData>>,
+    hash: String,
+    path: String,
+    content_type: String,
+    response: reqwest::Response,
+    reply: oneshot::Sender<anyhow::Result<File>>,
+) {
+    let mut output = DownloadOutput {
+        reply: Some(reply),
+        body: None,
+    };
+    let file_lock = tokio::select! {
+        biased;
+        _ = output.closed() => return,
+        lock = async { state.write().await.download_locks.entry(hash.clone()).or_default().clone() } => lock,
+    };
+    let mut file_guard = tokio::select! {
+        biased;
+        _ = output.closed() => None,
+        guard = file_lock.clone().write_owned() => Some(guard),
+    };
+    let mut writer = None;
+    let result = if file_guard.is_some() {
+        let storage = state.read().await.storage.clone();
+        transfer_response(
+            response,
+            &storage,
+            &path,
+            &content_type,
+            &mut output,
+            &mut writer,
+        )
+        .await
+    } else {
+        drop(response);
+        // A cancelled waiter must not remove the active owner's registration.
+        // Wait only for cleanup; no upstream work continues here.
+        file_guard = Some(file_lock.clone().write_owned().await);
+        Ok(None)
+    };
+    // The response has been dropped before cleanup, stopping upstream reads.
+    if let Some(mut writer) = writer
+        && let Err(err) = writer.abort().await
+    {
+        tracing::error!("Failed to abort artifact upload: {err}");
+    }
+    remove_download_lock(&state, &hash, &file_lock).await;
+    drop(file_guard);
+    // Publish errors only after cleanup: consumers need not poll after an error.
+    output.finish(result).await;
+}
+
+async fn transfer_response(
+    response: reqwest::Response,
+    storage: &Operator,
+    path: &str,
+    content_type: &str,
+    output: &mut DownloadOutput,
+    writer: &mut Option<opendal::Writer>,
+) -> anyhow::Result<Option<File>> {
+    let mut reader = BufferedResponseReader(response);
+    let first = tokio::select! {
+        biased;
+        _ = output.closed() => return Ok(None),
+        chunk = reader.chunk() => chunk?,
+    };
+    let Some(mut buf) = first else {
+        return Ok(Some(File::None));
+    };
+    let small = buf.len() < CHUNK_SIZE - 1;
+    if !small && !output.start_stream() {
+        return Ok(None);
+    }
+    // Writer operations are deliberately not raced against cancellation: OpenDAL
+    // does not guarantee they can be dropped safely. Check the consumer afterwards.
+    let active_writer = writer.insert(
+        storage
+            .writer_with(path)
+            .content_type(content_type)
+            .chunk(CHUNK_SIZE)
+            .await?,
+    );
+    if output.is_closed() {
+        return Ok(None);
+    }
+    loop {
+        active_writer.write(buf.clone()).await?;
+        if output.is_closed() {
+            return Ok(None);
+        }
+        if small {
+            active_writer.close().await?;
+            writer.take();
+            return Ok(Some(File::Bytes(buf)));
+        }
+        if !output.send_chunk(buf).await {
+            return Ok(None);
+        }
+        let next = tokio::select! {
+            biased;
+            _ = output.closed() => return Ok(None),
+            chunk = reader.chunk() => chunk?,
+        };
+        match next {
+            Some(chunk) => buf = chunk,
+            None => break,
+        }
+    }
+    if output.is_closed() {
+        return Ok(None);
+    }
+    active_writer.close().await?;
+    writer.take();
+    Ok(None)
+}
+
+type DownloadChunk = anyhow::Result<(Bytes, oneshot::Sender<()>)>;
+
+struct DownloadOutput {
+    reply: Option<oneshot::Sender<anyhow::Result<File>>>,
+    body: Option<mpsc::Sender<DownloadChunk>>,
+}
+
+impl DownloadOutput {
+    fn is_closed(&self) -> bool {
+        match &self.body {
+            Some(body) => body.is_closed(),
+            None => self.reply.as_ref().is_none_or(oneshot::Sender::is_closed),
+        }
+    }
+
+    async fn closed(&mut self) {
+        if let Some(body) = &self.body {
+            body.closed().await;
+        } else if let Some(reply) = &mut self.reply {
+            reply.closed().await;
+        }
+    }
+
+    fn start_stream(&mut self) -> bool {
+        let (sender, mut receiver) = mpsc::channel::<DownloadChunk>(1);
+        let stream = async_stream::stream! {
+            while let Some(chunk) = receiver.recv().await {
+                match chunk {
+                    Ok((bytes, consumed)) => {
+                        yield Ok(bytes);
+                        let _ = consumed.send(());
+                    }
+                    Err(err) => { yield Err(err); break; }
+                }
             }
-            Ok(Some(buf)) => buf,
-            Ok(None) => {
-                remove_download_lock(&self.0, &hash, &file_lock).await;
-                return Ok(File::None);
+        };
+        self.body = Some(sender);
+        let Some(reply) = self.reply.take() else {
+            return false;
+        };
+        reply.send(Ok(File::Stream(Box::pin(stream)))).is_ok()
+    }
+
+    async fn send_chunk(&self, bytes: Bytes) -> bool {
+        let (consumed, acknowledgement) = oneshot::channel();
+        let Some(body) = &self.body else {
+            return false;
+        };
+        if body.send(Ok((bytes, consumed))).await.is_err() {
+            return false;
+        }
+        // Do not prefetch: resume upstream reads only when the body asks for more.
+        acknowledgement.await.is_ok()
+    }
+
+    async fn finish(mut self, result: anyhow::Result<Option<File>>) {
+        match result {
+            Ok(Some(file)) => {
+                if let Some(reply) = self.reply.take() {
+                    let _ = reply.send(Ok(file));
+                }
             }
             Err(err) => {
-                remove_download_lock(&self.0, &hash, &file_lock).await;
-                return Err(err.into());
+                if let Some(reply) = self.reply.take() {
+                    let _ = reply.send(Err(err));
+                } else if let Some(body) = self.body.take() {
+                    let _ = body.send(Err(err)).await;
+                }
             }
-        };
-
-        let data_ptr = self.0.clone();
-        let stream = async_stream::stream! {
-            let _file_write_guard = file_lock.write().await;
-            let storage = data_ptr.read().await.storage.clone();
-            // Finish cleanup before exposing an error: the consumer may stop polling then.
-            let result: anyhow::Result<()> = 'upload: {
-                let mut writer = match storage.writer_with(&object_path)
-                    .content_type(&content_type).chunk(CHUNK_SIZE).await {
-                    Ok(writer) => writer,
-                    Err(err) => break 'upload Err(err.into()),
-                };
-
-                if let Err(err) = writer.write(buf.clone()).await {
-                    let _ = writer.abort().await;
-                    break 'upload Err(err.into());
-                }
-                yield Ok(buf);
-
-                loop {
-                    let next = match buffered_reader.chunk().await {
-                        Ok(next) => next,
-                        Err(err) => {
-                            let _ = writer.abort().await;
-                            break 'upload Err(err.into());
-                        }
-                    };
-                    let Some(buf) = next else { break };
-                    if let Err(err) = writer.write(buf.clone()).await {
-                        let _ = writer.abort().await;
-                        break 'upload Err(err.into());
-                    }
-                    yield Ok(buf);
-                }
-                if let Err(err) = writer.close().await {
-                    let _ = writer.abort().await;
-                    break 'upload Err(err.into());
-                }
-                Ok(())
-            };
-            remove_download_lock(&data_ptr, &hash, &file_lock).await;
-            if let Err(err) = result {
-                yield Err(err);
-            }
-        };
-
-        Ok(File::Stream(Box::pin(stream)))
+            Ok(None) => {}
+        }
     }
 }
 
@@ -923,6 +1045,141 @@ mod storage_tests {
         assert_eq!(chunks.concat(), b"valid artifact");
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    async fn cancellation_fixture(
+        prefix_size: usize,
+    ) -> (
+        State,
+        std::path::PathBuf,
+        reqwest::Response,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/file", listener.local_addr().unwrap());
+        let upstream = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(socket.read_u8().await.unwrap());
+                assert!(request.len() < 8192);
+            }
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        CHUNK_SIZE * 4
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            socket.write_all(&vec![42; prefix_size]).await.unwrap();
+            // No further body is sent. Cancellation must close the upstream socket.
+            assert_eq!(socket.read(&mut [0]).await.unwrap(), 0);
+        });
+        let root = std::env::temp_dir().join(format!(
+            "pipr-cancel-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut settings = Settings::template();
+        let mut config = opendal::services::FsConfig::default();
+        config.root = Some(root.to_str().unwrap().into());
+        settings.storage = crate::storage::Storage::Fs(config);
+        let state = State::try_from(settings).unwrap();
+        let response = Client::new().get(url).send().await.unwrap();
+        (state, root, response, upstream)
+    }
+
+    #[tokio::test]
+    async fn dropped_initial_reply_or_unpolled_body_aborts_and_releases_registration() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            for prefix_size in [0, CHUNK_SIZE + 1] {
+                let (state, root, response, upstream) = cancellation_fixture(prefix_size).await;
+                let (reply, result) = oneshot::channel();
+                let mut download = Box::pin(download_response(
+                    state.0.clone(),
+                    "test-id".into(),
+                    "artifact.whl".into(),
+                    "application/octet-stream".into(),
+                    response,
+                    reply,
+                ));
+                assert!(futures::poll!(&mut download).is_pending());
+                if prefix_size == 0 {
+                    assert!(state.0.read().await.download_locks.contains_key("test-id"));
+                    drop(result);
+                    download.await;
+                } else {
+                    let owner = tokio::spawn(download);
+                    let File::Stream(stream) = result.await.unwrap().unwrap() else {
+                        panic!("large body must stream");
+                    };
+                    // Activate the writer without polling the body itself.
+                    while std::fs::read_dir(root.join(".tmp"))
+                        .unwrap()
+                        .next()
+                        .is_none()
+                    {
+                        tokio::task::yield_now().await;
+                    }
+                    drop(stream);
+                    owner.await.unwrap();
+                }
+                upstream.await.unwrap();
+                assert!(state.0.read().await.download_locks.is_empty());
+                assert!(!root.join("artifact.whl").exists());
+                assert_eq!(std::fs::read_dir(root.join(".tmp")).unwrap().count(), 0);
+                drop(state);
+                std::fs::remove_dir_all(root).unwrap();
+            }
+        })
+        .await
+        .expect("cancelled owner must stop upstream and finish cleanup");
+    }
+
+    #[tokio::test]
+    async fn cancelled_waiter_preserves_active_download_registration() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let (state, root, response, upstream) = cancellation_fixture(0).await;
+            let lock = Arc::new(RwLock::new(()));
+            let active = lock.clone().write_owned().await;
+            state
+                .0
+                .write()
+                .await
+                .download_locks
+                .insert("test-id".into(), lock.clone());
+            let (reply, result) = oneshot::channel();
+            let mut download = Box::pin(download_response(
+                state.0.clone(),
+                "test-id".into(),
+                "artifact.whl".into(),
+                "application/octet-stream".into(),
+                response,
+                reply,
+            ));
+            assert!(futures::poll!(&mut download).is_pending());
+            drop(result);
+            assert!(futures::poll!(&mut download).is_pending());
+            upstream.await.unwrap();
+            assert!(Arc::ptr_eq(
+                state.0.read().await.download_locks.get("test-id").unwrap(),
+                &lock
+            ));
+            drop(active);
+            download.await;
+            assert!(state.0.read().await.download_locks.is_empty());
+            drop(state);
+            std::fs::remove_dir_all(root).unwrap();
+        })
+        .await
+        .expect("cancelled waiter must retain registration until safe cleanup");
     }
 
     async fn failed_download_fixture(

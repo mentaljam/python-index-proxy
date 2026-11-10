@@ -65,6 +65,7 @@ def test_cancelled_download_allows_clean_client_retry(
     url = urlsplit(artifact_url(proxy, wheel))
     assert url.hostname is not None
     connection = http.client.HTTPConnection(url.hostname, url.port, timeout=10)
+    temporary = proxy.root.joinpath("artifacts", ".tmp")
     try:
         connection.request("GET", url.path)
         response = connection.getresponse()
@@ -73,14 +74,28 @@ def test_cancelled_download_allows_clean_client_retry(
         assert response.read(1) == wheel.content[:1]
         # Disconnect after observing proxy output, while upstream is still paused.
         assert not gate.release.is_set()
+        assert list(temporary.rglob("*")), (
+            "streaming write must be active before disconnect"
+        )
         response.close()
         connection.close()
+        deadline = time.monotonic() + 5
+        while any(temporary.rglob("*")) and time.monotonic() < deadline:
+            threading.Event().wait(0.05)
+        assert not list(temporary.rglob("*")), (
+            "disconnect must abort without waiting for upstream"
+        )
+        assert not [
+            path
+            for path in proxy.root.joinpath("artifacts").rglob("*")
+            if path.is_file() and temporary not in path.parents
+        ], "cancelled download must not publish an incomplete artifact"
     finally:
         connection.close()
         gate.release.set()
 
-    # Either completing the background fill or aborting it is acceptable. A fresh
-    # client must still install correct bytes and no abandoned write may remain.
+    # Cancellation aborts the first fill. A fresh client must install correct bytes
+    # and populate a usable cache entry.
     python = client.environment()
     require_success(
         client.install(python, proxy.index_url, "pipr-e2e-app==1.0.0"), proxy

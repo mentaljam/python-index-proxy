@@ -101,9 +101,9 @@ Both tools target the project's minimum Python version, 3.12.
 - Missing packages must return HTTP 404; an unavailable sole upstream must return
   a server error rather than masquerading as a missing package, and recover once
   the upstream serves the package again.
-- Disconnecting an HTTP consumer after streamed bytes are observed must permit a
-  fresh pip/uv installation with correct bytes and leave no abandoned temporary
-  artifacts. Either finishing the background fill or aborting it is acceptable.
+- Disconnecting an HTTP consumer after streamed bytes are observed must abort
+  the fill and remove temporary artifacts while upstream is still paused. A
+  fresh pip/uv installation must then fetch correct bytes and populate the cache.
 - Two independent pip/uv environments request the same large wheel while its
   upstream response is paused. Both installations must finish with correct
   module behavior and cached bytes. A local forwarding observer confirms both
@@ -151,9 +151,6 @@ Kubernetes, sdist builds, or installation from public indexes.
 
 Additional expected failures in `test_resilience.py`:
 
-- `test_cancelled_download_allows_clean_client_retry[pip/uv]`: retry installs
-  correctly, but interrupted writes leave files in filesystem storage's `.tmp`
-  directory after the bounded cleanup wait.
 - `test_upstream_unavailability_is_not_package_absence`: a sole upstream's 503
   currently becomes proxy 404 instead of a server error. The recovery assertion
   follows this status assertion and will become reachable once it is fixed.
