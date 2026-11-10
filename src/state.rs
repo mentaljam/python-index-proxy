@@ -25,7 +25,6 @@ impl TryFrom<Settings> for State {
     type Error = anyhow::Error;
 
     fn try_from(settings: Settings) -> Result<Self, Self::Error> {
-        let settings = settings.validated()?;
         let Settings {
             bind,
             path_prefix,

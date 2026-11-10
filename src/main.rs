@@ -44,7 +44,7 @@ async fn main() {
 }
 
 async fn serve() -> anyhow::Result<()> {
-    let settings = Settings::new()?.validated()?;
+    let settings = Settings::new()?;
     let bind = settings.bind;
     let router = get_router(&settings.path_prefix);
     let state: state::State = settings.try_into()?;

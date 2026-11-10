@@ -174,9 +174,10 @@ fn default_public_url_uses_the_configured_socket_address_and_normalized_prefix()
         ("0.0.0.0:3000", "http://0.0.0.0:3000/proxy/"),
         ("[::]:3000", "http://[::]:3000/proxy/"),
     ] {
-        let mut settings = Settings::template();
-        settings.bind = bind.parse().unwrap();
-        settings.path_prefix = "/proxy".into();
+        let mut settings: Settings = toml::from_str(&format!(
+            "bind = '{bind}'\npath_prefix = '/proxy'\n[storage.fs]\nroot = 'artifacts'"
+        ))
+        .unwrap();
         let mut config = opendal::services::FsConfig::default();
         config.root = Some(root.to_str().unwrap().into());
         settings.storage = crate::storage::Storage::Fs(config);

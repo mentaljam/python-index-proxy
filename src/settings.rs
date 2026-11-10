@@ -7,11 +7,18 @@ use serde::{Deserialize, Serialize};
 pub struct Settings {
     #[serde(default = "defaults::bind")]
     pub bind: SocketAddr,
-    #[serde(default = "defaults::path_prefix")]
+    #[serde(
+        default = "defaults::path_prefix",
+        deserialize_with = "de::path_prefix"
+    )]
     pub path_prefix: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "de::public_url"
+    )]
     pub public_url: Option<String>,
-    #[serde(default = "defaults::indices")]
+    #[serde(default = "defaults::indices", deserialize_with = "de::indices")]
     pub indices: HashMap<String, Vec<String>>,
     #[serde(default)]
     pub index_cache: Cache,
@@ -59,7 +66,13 @@ pub struct Cache {
 
 #[derive(Deserialize, Serialize)]
 #[serde(transparent)]
-pub struct CacheTtl(#[serde(with = "humantime_serde")] Duration);
+pub struct CacheTtl(
+    #[serde(
+        serialize_with = "humantime_serde::serialize",
+        deserialize_with = "de::positive_duration"
+    )]
+    Duration,
+);
 
 impl Default for CacheTtl {
     fn default() -> Self {
@@ -75,7 +88,13 @@ impl From<CacheTtl> for Duration {
 
 #[derive(Deserialize, Serialize)]
 #[serde(transparent)]
-pub struct MaxCacheCapacity(#[serde(with = "byte_unit_serde")] u64);
+pub struct MaxCacheCapacity(
+    #[serde(
+        serialize_with = "byte_unit_serde::serialize",
+        deserialize_with = "de::positive_bytes"
+    )]
+    u64,
+);
 
 impl Default for MaxCacheCapacity {
     fn default() -> Self {
@@ -92,9 +111,14 @@ impl From<MaxCacheCapacity> for u64 {
 #[derive(Deserialize, Serialize, Clone)]
 #[serde(default)]
 pub struct Limits {
-    #[serde(with = "byte_unit_serde")]
+    #[serde(
+        serialize_with = "byte_unit_serde::serialize",
+        deserialize_with = "de::page_size"
+    )]
     pub max_index_page_size: u64,
+    #[serde(deserialize_with = "de::concurrency")]
     pub max_index_refreshes: usize,
+    #[serde(deserialize_with = "de::concurrency")]
     pub max_artifact_downloads: usize,
 }
 
@@ -111,13 +135,25 @@ impl Default for Limits {
 #[derive(Deserialize, Serialize, Clone, Copy)]
 #[serde(default)]
 pub struct Upstream {
-    #[serde(with = "humantime_serde")]
+    #[serde(
+        serialize_with = "humantime_serde::serialize",
+        deserialize_with = "de::timeout"
+    )]
     pub connect_timeout: Duration,
-    #[serde(with = "humantime_serde")]
+    #[serde(
+        serialize_with = "humantime_serde::serialize",
+        deserialize_with = "de::timeout"
+    )]
     pub response_header_timeout: Duration,
-    #[serde(with = "humantime_serde")]
+    #[serde(
+        serialize_with = "humantime_serde::serialize",
+        deserialize_with = "de::timeout"
+    )]
     pub read_timeout: Duration,
-    #[serde(with = "humantime_serde")]
+    #[serde(
+        serialize_with = "humantime_serde::serialize",
+        deserialize_with = "de::timeout"
+    )]
     pub index_download_timeout: Duration,
 }
 
@@ -132,76 +168,95 @@ impl Default for Upstream {
     }
 }
 
-impl Settings {
-    pub(crate) fn validated(mut self) -> anyhow::Result<Self> {
-        self.validate_resources()?;
-        self.path_prefix = validate_path_prefix(&self.path_prefix)?;
-        self.public_url = self
-            .public_url
+mod de {
+    use serde::{Deserializer, de::Error};
+
+    use super::*;
+
+    pub fn path_prefix<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        parse_path_prefix(&value).map_err(D::Error::custom)
+    }
+
+    pub fn public_url<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<String>, D::Error> {
+        Option::<String>::deserialize(deserializer)?
             .as_deref()
-            .map(validate_public_url)
-            .transpose()?;
-        for (index, templates) in &mut self.indices {
-            anyhow::ensure!(
-                crate::paths::valid_index_name(index),
-                "indices contains an invalid name: expected ASCII alphanumeric endpoints and only letters, digits, '.', '_' or '-'"
-            );
+            .map(parse_public_url)
+            .transpose()
+            .map_err(D::Error::custom)
+    }
+
+    pub fn indices<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<HashMap<String, Vec<String>>, D::Error> {
+        let mut indices = HashMap::<String, Vec<String>>::deserialize(deserializer)?;
+        for (index, templates) in &mut indices {
+            if !crate::paths::valid_index_name(index) {
+                return Err(D::Error::custom(
+                    "indices contains an invalid name: expected ASCII alphanumeric endpoints and only letters, digits, '.', '_' or '-'",
+                ));
+            }
             for (position, template) in templates.iter_mut().enumerate() {
                 // Do not include raw URLs: they can contain credentials/query secrets.
                 *template = crate::index::IndexUrlTemplate::parse(template)
-                    .map_err(|error| anyhow::anyhow!("indices.{index}[{position}]: {error}"))?
+                    .map_err(|error| {
+                        D::Error::custom(format!("indices.{index}[{position}]: {error}"))
+                    })?
                     .0;
             }
         }
-        Ok(self)
+        Ok(indices)
     }
 
-    pub(crate) fn validate_resources(&self) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            self.index_cache.max_capacity.0 > 0,
-            "index_cache.max_capacity must be positive"
-        );
-        anyhow::ensure!(
-            !self.index_cache.ttl.0.is_zero(),
-            "index_cache.ttl must be positive"
-        );
-        anyhow::ensure!(
-            self.limits.max_index_page_size > 0
-                && usize::try_from(self.limits.max_index_page_size).is_ok(),
-            "limits.max_index_page_size must be positive and fit this platform"
-        );
-        for (name, count) in [
-            ("max_index_refreshes", self.limits.max_index_refreshes),
-            ("max_artifact_downloads", self.limits.max_artifact_downloads),
-        ] {
-            anyhow::ensure!(
-                count > 0 && count <= tokio::sync::Semaphore::MAX_PERMITS,
-                "limits.{name} must be between 1 and {}",
+    pub fn positive_bytes<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+        let value = byte_unit_serde::deserialize(deserializer)?;
+        if value == 0 {
+            return Err(D::Error::custom("byte size must be positive"));
+        }
+        Ok(value)
+    }
+
+    pub fn page_size<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+        let value = positive_bytes(deserializer)?;
+        if usize::try_from(value).is_err() {
+            return Err(D::Error::custom("index page size must fit this platform"));
+        }
+        Ok(value)
+    }
+
+    pub fn concurrency<'de, D: Deserializer<'de>>(deserializer: D) -> Result<usize, D::Error> {
+        let value = usize::deserialize(deserializer)?;
+        if value == 0 || value > tokio::sync::Semaphore::MAX_PERMITS {
+            return Err(D::Error::custom(format!(
+                "concurrency must be between 1 and {}",
                 tokio::sync::Semaphore::MAX_PERMITS
-            );
+            )));
         }
-        for (name, duration) in [
-            ("connect_timeout", self.upstream.connect_timeout),
-            (
-                "response_header_timeout",
-                self.upstream.response_header_timeout,
-            ),
-            ("read_timeout", self.upstream.read_timeout),
-            (
-                "index_download_timeout",
-                self.upstream.index_download_timeout,
-            ),
-        ] {
-            anyhow::ensure!(
-                !duration.is_zero() && std::time::Instant::now().checked_add(duration).is_some(),
-                "upstream.{name} must be positive and fit this platform's clock"
-            );
+        Ok(value)
+    }
+
+    pub fn positive_duration<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Duration, D::Error> {
+        let value: Duration = humantime_serde::deserialize(deserializer)?;
+        if value.is_zero() {
+            return Err(D::Error::custom("duration must be positive"));
         }
-        Ok(())
+        Ok(value)
+    }
+
+    pub fn timeout<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
+        let value = positive_duration(deserializer)?;
+        if std::time::Instant::now().checked_add(value).is_none() {
+            return Err(D::Error::custom("timeout must fit this platform's clock"));
+        }
+        Ok(value)
     }
 }
 
-fn validate_public_url(value: &str) -> anyhow::Result<String> {
+fn parse_public_url(value: &str) -> anyhow::Result<String> {
     // Keep diagnostics independent of the value: rejected URLs may contain secrets.
     anyhow::ensure!(
         !value
@@ -238,7 +293,7 @@ fn validate_public_url(value: &str) -> anyhow::Result<String> {
     Ok(url.into())
 }
 
-fn validate_path_prefix(value: &str) -> anyhow::Result<String> {
+fn parse_path_prefix(value: &str) -> anyhow::Result<String> {
     anyhow::ensure!(
         value.starts_with('/')
             && !value.starts_with("//")
@@ -308,6 +363,13 @@ mod defaults {
 mod tests {
     use super::*;
 
+    fn parse_settings(source: &str) -> Result<Settings, ConfigError> {
+        Config::builder()
+            .add_source(File::from_str(source, config::FileFormat::Toml))
+            .build()?
+            .try_deserialize()
+    }
+
     #[test]
     fn resource_defaults_and_partial_overrides() {
         let settings: Settings = toml::from_str("[storage.fs]\nroot = 'artifacts'\n[limits]\nmax_index_refreshes = 2\n[upstream]\nread_timeout = '250ms'").unwrap();
@@ -326,16 +388,14 @@ mod tests {
             settings.upstream.index_download_timeout,
             Duration::from_secs(60)
         );
-        settings.validate_resources().unwrap();
         assert!(settings.public_url.is_none());
     }
 
     #[test]
     fn public_url_is_optional_independent_and_rejects_secrets_without_echoing_them() {
-        let mut settings = Settings::template();
-        settings.path_prefix = "/internal".into();
-        settings.public_url = Some("HTTPS://Packages.Example.test/external/a&b".into());
-        let settings = settings.validated().unwrap();
+        let settings = parse_settings(
+            "path_prefix = '/internal'\npublic_url = 'HTTPS://Packages.Example.test/external/a&b'\n[storage.fs]\nroot = 'artifacts'",
+        ).unwrap();
         assert_eq!(settings.path_prefix, "/internal/");
         assert_eq!(
             settings.public_url.as_deref(),
@@ -357,9 +417,11 @@ mod tests {
             "https://example.test/ space",
             "https://example.test/\\path",
         ] {
-            let mut settings = Settings::template();
-            settings.public_url = Some(value.into());
-            let error = match settings.validated() {
+            let source = format!(
+                "public_url = {}\n[storage.fs]\nroot = 'artifacts'",
+                toml::Value::String(value.into())
+            );
+            let error = match parse_settings(&source) {
                 Ok(_) => panic!("accepted invalid public_url"),
                 Err(error) => format!("{error:#}"),
             };
@@ -382,28 +444,28 @@ mod tests {
             "[upstream]\nread_timeout = '0s'",
             "[upstream]\nindex_download_timeout = '0s'",
         ] {
-            let settings: Settings =
-                toml::from_str(&format!("[storage.fs]\nroot = 'artifacts'\n{fragment}")).unwrap();
             assert!(
-                settings.validate_resources().is_err(),
+                parse_settings(&format!("[storage.fs]\nroot = 'artifacts'\n{fragment}")).is_err(),
                 "accepted {fragment}"
             );
         }
-        let mut settings = Settings::template();
-        settings.limits.max_index_refreshes = usize::MAX;
-        assert!(settings.validate_resources().is_err());
+        let invalid = tokio::sync::Semaphore::MAX_PERMITS + 1;
+        for field in ["max_index_refreshes", "max_artifact_downloads"] {
+            assert!(
+                parse_settings(&format!(
+                    "[storage.fs]\nroot = 'artifacts'\n[limits]\n{field} = {invalid}"
+                ))
+                .is_err()
+            );
+        }
+        assert!(parse_settings("[storage.fs]\nroot = 'artifacts'\n[upstream]\nread_timeout = '18446744073709551615s'").is_err());
     }
 
     #[test]
-    fn validate_programmatic_settings_and_normalize_path_templates() {
-        let mut settings = Settings::template();
-        settings.path_prefix = "/nested/a&b/%7Eroot".into();
-        settings.indices = [(
-            "Private_1.example".into(),
-            vec!["https://user:secret@example.test/simple/{package}?token=private".into()],
-        )]
-        .into();
-        let settings = settings.validated().unwrap();
+    fn deserialize_and_normalize_path_templates() {
+        let settings = parse_settings(
+            "path_prefix = '/nested/a&b/%7Eroot'\n[indices]\n'Private_1.example' = ['https://user:secret@example.test/simple/{package}?token=private']\n[storage.fs]\nroot = 'artifacts'",
+        ).unwrap();
         assert_eq!(settings.path_prefix, "/nested/a&b/%7Eroot/");
         let template = &settings.indices["Private_1.example"][0];
         assert_eq!(
@@ -411,10 +473,13 @@ mod tests {
             "https://user:secret@example.test/simple/{package}/?token=private"
         );
         assert!(!settings.indices.contains_key("private_1.example"));
-        // Validation also applies when bypassing deserialization entirely.
-        let mut settings = Settings::template();
-        settings.indices = [("bad/name".into(), Vec::new())].into();
-        assert!(crate::state::State::try_from(settings).is_err());
+    }
+
+    #[test]
+    fn serialized_template_deserializes_with_the_same_defaults() {
+        let serialized = toml::to_string(&Settings::template()).unwrap();
+        let parsed = parse_settings(&serialized).unwrap();
+        assert_eq!(toml::to_string(&parsed).unwrap(), serialized);
     }
 
     #[test]
@@ -441,16 +506,23 @@ mod tests {
             "/api/<tag>/",
             "/api/ space/",
         ] {
-            let mut settings = Settings::template();
-            settings.path_prefix = prefix.into();
-            assert!(settings.validated().is_err(), "accepted prefix {prefix:?}");
+            let source = format!(
+                "path_prefix = {}\n[storage.fs]\nroot = 'artifacts'",
+                toml::Value::String(prefix.into())
+            );
+            assert!(
+                parse_settings(&source).is_err(),
+                "accepted prefix {prefix:?}"
+            );
         }
         for index in [
             "", ".", "..", "a/", "a\\b", "-start", "end_", " space", "name!", "α",
         ] {
-            let mut settings = Settings::template();
-            settings.indices = [(index.into(), Vec::new())].into();
-            assert!(settings.validated().is_err(), "accepted index {index:?}");
+            let source = format!(
+                "[storage.fs]\nroot = 'artifacts'\n[indices]\n{} = []",
+                toml::Value::String(index.into())
+            );
+            assert!(parse_settings(&source).is_err(), "accepted index {index:?}");
         }
         for template in [
             "https://user:secret@example.test/simple/",
@@ -466,9 +538,11 @@ mod tests {
             "https://user:secret@[invalid]/{package}/",
             "https://user:secret@example.test/{package}/../",
         ] {
-            let mut settings = Settings::template();
-            settings.indices = [("private".into(), vec![template.into()])].into();
-            let error = match settings.validated() {
+            let source = format!(
+                "[storage.fs]\nroot = 'artifacts'\n[indices]\nprivate = [{}]",
+                toml::Value::String(template.into())
+            );
+            let error = match parse_settings(&source) {
                 Ok(_) => panic!("accepted invalid template"),
                 Err(error) => format!("{error:#}"),
             };
