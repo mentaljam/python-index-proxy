@@ -121,6 +121,13 @@ Both tools target the project's minimum Python version, 3.12.
   internal lock scheduling. The completed installations must share exactly one
   upstream GET for their common wheel within this replica. This fixture advertises
   PEP 658 metadata so uv does not need separate, intentionally canceled wheel probes.
+- Saturated index-refresh and artifact-fill budgets return 503 with
+  `Retry-After: 1`, without starting unrelated upstream work. Cached responses
+  remain available, concurrent same-key requests return the same bytes with one
+  upstream GET, and new work succeeds after the active transfer completes.
+- Plain and gzip-compressed index pages exceeding the decoded-body limit return
+  502 without caching partial results. Stalled index and artifact reads also
+  return 502 before response streaming starts; both paths recover on retry.
 - Real clients skip incompatible `data-requires-python` candidates and yanked
   candidates for an unconstrained requirement. Direct-upstream controls use the
   same candidate pages, then proxy installations verify the chosen version and

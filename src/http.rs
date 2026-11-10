@@ -43,7 +43,7 @@ async fn get_detail(
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(err) => {
             tracing::error!("{err:?}");
-            error_status(&err).into_response()
+            error_response(&err)
         }
     }
 }
@@ -61,16 +61,27 @@ async fn get_file(
         Ok(File::None) => StatusCode::NOT_FOUND.into_response(),
         Err(err) => {
             tracing::error!("{err:?}");
-            error_status(&err).into_response()
+            error_response(&err)
         }
     }
 }
 
 fn error_status(error: &anyhow::Error) -> StatusCode {
-    if error.is::<UpstreamIndexError>() {
+    if error.is::<crate::coordination::ResourceLimit>() {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else if error.is::<UpstreamIndexError>() {
         StatusCode::BAD_GATEWAY
     } else {
         StatusCode::INTERNAL_SERVER_ERROR
+    }
+}
+
+fn error_response(error: &anyhow::Error) -> Response {
+    let status = error_status(error);
+    if status == StatusCode::SERVICE_UNAVAILABLE {
+        (status, [(header::RETRY_AFTER, "1")]).into_response()
+    } else {
+        status.into_response()
     }
 }
 

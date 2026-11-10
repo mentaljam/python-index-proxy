@@ -6,14 +6,15 @@ use std::{
     },
 };
 
-use anyhow::Context;
 use bytes::Bytes;
 use reqwest::Client;
 use tokio::sync::Mutex;
 use url::Url;
 
 use crate::{
+    coordination::ResourceLimit,
     paths::{encode_segment, valid_filename},
+    settings::Upstream,
     state::State,
 };
 
@@ -84,9 +85,30 @@ impl State {
         {
             return Ok(Some(detail));
         }
-        let result =
-            Self::fetch_package_detail(index_slug, package, &base_url, url_templates, http_client)
-                .await;
+        let (permits, upstream, max_size) = {
+            let data = self.0.read().await;
+            (
+                data.index_permits.clone(),
+                data.upstream,
+                data.limits.max_index_page_size,
+            )
+        };
+        let result = match permits.try_acquire_owned() {
+            Ok(permit) => {
+                Self::fetch_package_detail(
+                    index_slug,
+                    package,
+                    &base_url,
+                    url_templates,
+                    http_client,
+                    upstream,
+                    max_size,
+                    Arc::new(permit),
+                )
+                .await
+            }
+            Err(_) => Err(anyhow::Error::new(ResourceLimit)),
+        };
         if let Ok(Some(detail)) = &result {
             index_cache.insert(cache_key, detail.clone()).await;
         }
@@ -97,35 +119,37 @@ impl State {
         shared
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Explicit immutable refresh inputs and owned permit"
+    )]
     async fn fetch_package_detail(
         index_slug: &str,
         package: &str,
         base_url: &str,
         url_templates: Vec<IndexUrlTemplate>,
         http_client: Client,
+        upstream: Upstream,
+        max_size: u64,
+        permit: Arc<tokio::sync::OwnedSemaphorePermit>,
     ) -> anyhow::Result<Option<Arc<PackageDetail>>> {
         let mut parser = DetailParser::new(base_url, index_slug, package);
         for template in url_templates {
-            let response = http_client
-                .get(template.package_url(package)?)
-                .send()
-                .await
-                .context(UpstreamIndexError)?;
-            if response.status() == reqwest::StatusCode::NOT_FOUND {
+            let Some((final_url, content)) = crate::upstream::index_page(
+                &http_client,
+                template.package_url(package)?,
+                upstream,
+                max_size,
+            )
+            .await?
+            else {
                 continue;
-            }
-            if !response.status().is_success() {
-                return Err(anyhow::anyhow!(
-                    "Upstream index {} returned {}",
-                    response.url(),
-                    response.status()
-                )
-                .context(UpstreamIndexError));
-            }
-            let final_url = response.url().clone();
-            let content = response.bytes().await.context(UpstreamIndexError)?;
+            };
+            // A started blocking parse survives cancellation of its async caller.
+            let parsing_permit = permit.clone();
             // Parsing is CPU-bound and must not monopolize an async worker.
             parser = tokio::task::spawn_blocking(move || {
+                let _permit = parsing_permit;
                 parser.parse_html(&final_url, &content)?;
                 Ok::<_, anyhow::Error>(parser)
             })
@@ -161,8 +185,11 @@ impl std::error::Error for SharedRefreshError {
 fn share_refresh_result(result: &RefreshResult) -> anyhow::Result<Option<Arc<PackageDetail>>> {
     result.clone().map_err(|error| {
         let upstream = error.is::<UpstreamIndexError>();
+        let limited = error.is::<ResourceLimit>();
         let error = anyhow::Error::new(SharedRefreshError(error));
-        if upstream {
+        if limited {
+            error.context(ResourceLimit)
+        } else if upstream {
             error.context(UpstreamIndexError)
         } else {
             error

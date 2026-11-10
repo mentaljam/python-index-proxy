@@ -11,3 +11,23 @@ bucket = "python-index-proxy"
 region = "us-east-1"
 access_key_id = "siloadmin"
 secret_access_key = "siloadmin"
+
+# Per-replica content budget; allocator overhead and in-flight work are separate.
+[index_cache]
+max_capacity = "128 MiB"
+ttl = "1h"
+
+[limits]
+# Saturated new work returns 503 with Retry-After: 1; same-key requests coalesce.
+# Maximum decoded body of each upstream index page.
+max_index_page_size = "32 MiB"
+max_index_refreshes = 4
+max_artifact_downloads = 16
+
+# Upstream HTTP only; storage operations retain their backend behavior.
+[upstream]
+connect_timeout = "5s"
+response_header_timeout = "30s"
+read_timeout = "30s"
+# Per source, from request start through body completion; excludes parsing.
+index_download_timeout = "60s"

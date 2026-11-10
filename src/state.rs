@@ -3,12 +3,12 @@ use std::{collections::HashMap, sync::Arc};
 use moka::future::Cache;
 use opendal::Operator;
 use reqwest::Client;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, Semaphore};
 
 use crate::{
     coordination::KeyedFlights,
     index::{IndexRefresh, IndexUrlTemplate, PackageDetail, format_indices_list},
-    settings::Settings,
+    settings::{Limits, Settings, Upstream},
 };
 
 #[derive(Clone)]
@@ -24,11 +24,14 @@ impl TryFrom<Settings> for State {
     type Error = anyhow::Error;
 
     fn try_from(settings: Settings) -> Result<Self, Self::Error> {
+        settings.validate_resources()?;
         let Settings {
             base_url,
             index_cache,
             indices,
             storage,
+            limits,
+            upstream,
             ..
         } = settings;
 
@@ -52,7 +55,13 @@ impl TryFrom<Settings> for State {
 
         let data = StateData {
             base_url,
-            http_client: Client::new(),
+            http_client: Client::builder()
+                .connect_timeout(upstream.connect_timeout)
+                .build()?,
+            index_permits: Arc::new(Semaphore::new(limits.max_index_refreshes)),
+            artifact_permits: Arc::new(Semaphore::new(limits.max_artifact_downloads)),
+            limits,
+            upstream,
             index_cache,
             indices,
             indices_list,
@@ -66,6 +75,10 @@ impl TryFrom<Settings> for State {
 }
 
 pub(crate) struct StateData {
+    pub(crate) limits: Limits,
+    pub(crate) upstream: Upstream,
+    pub(crate) index_permits: Arc<Semaphore>,
+    pub(crate) artifact_permits: Arc<Semaphore>,
     pub(crate) base_url: String,
     pub(crate) http_client: Client,
     pub(crate) index_cache: Cache<String, Arc<PackageDetail>>,

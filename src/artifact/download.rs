@@ -4,7 +4,7 @@ use bytes::{Bytes, BytesMut};
 use opendal::Operator;
 use tokio::sync::{RwLock, mpsc, oneshot};
 
-use crate::state::StateData;
+use crate::{coordination::ResourceLimit, settings::Upstream, state::StateData};
 
 use super::{File, cached_file};
 
@@ -23,9 +23,14 @@ pub(super) async fn download_response(
         reply: Some(reply),
         body: None,
     };
-    let (locks, storage) = {
+    let (locks, storage, permits, upstream) = {
         let data = state.read().await;
-        (data.download_locks.clone(), data.storage.clone())
+        (
+            data.download_locks.clone(),
+            data.storage.clone(),
+            data.artifact_permits.clone(),
+            data.upstream,
+        )
     };
     let lease = locks.lease(path.clone());
     let file_guard = tokio::select! {
@@ -34,12 +39,23 @@ pub(super) async fn download_response(
         guard = lease.entry.lock() => guard,
     };
     let mut writer = None;
-    let result = fill_artifact(&storage, &path, fetch, &mut output, &mut writer).await;
+    let mut permit = None;
+    let result = async {
+        // Same-key waiters can use a completed object even while other fills
+        // exhaust the global budget. Only a new fill needs a permit.
+        if let Some(file) = stored_file(&storage, &path).await? {
+            return Ok(Some(file));
+        }
+        permit = Some(permits.try_acquire_owned().map_err(|_| ResourceLimit)?);
+        fill_artifact(&storage, &path, fetch, &mut output, &mut writer, upstream).await
+    }
+    .await;
     if let Some(mut writer) = writer
         && let Err(err) = writer.abort().await
     {
         tracing::error!("Failed to abort artifact upload: {err}");
     }
+    drop(permit);
     drop(file_guard);
     drop(lease);
     // Publish errors only after cleanup: consumers need not poll after an error.
@@ -60,11 +76,8 @@ async fn fill_artifact(
     fetch: impl Future<Output = anyhow::Result<Option<reqwest::Response>>>,
     output: &mut DownloadOutput,
     writer: &mut Option<opendal::Writer>,
+    upstream: Upstream,
 ) -> anyhow::Result<Option<File>> {
-    // Recheck after waiting: the previous owner may have completed this object.
-    if let Some(file) = stored_file(storage, path).await? {
-        return Ok(Some(file));
-    }
     let response = tokio::select! {
         biased;
         _ = output.closed() => return Ok(None),
@@ -79,7 +92,16 @@ async fn fill_artifact(
         .and_then(|value| value.to_str().ok())
         .unwrap_or("application/octet-stream")
         .to_owned();
-    transfer_response(response, storage, path, &content_type, output, writer).await
+    transfer_response(
+        response,
+        storage,
+        path,
+        &content_type,
+        output,
+        writer,
+        upstream,
+    )
+    .await
 }
 
 async fn transfer_response(
@@ -89,8 +111,9 @@ async fn transfer_response(
     content_type: &str,
     output: &mut DownloadOutput,
     writer: &mut Option<opendal::Writer>,
+    upstream: Upstream,
 ) -> anyhow::Result<Option<File>> {
-    let mut reader = BufferedResponseReader(response);
+    let mut reader = BufferedResponseReader(response, upstream);
     let first = tokio::select! {
         biased;
         _ = output.closed() => return Ok(None),
@@ -220,12 +243,12 @@ impl DownloadOutput {
     }
 }
 
-struct BufferedResponseReader(reqwest::Response);
+struct BufferedResponseReader(reqwest::Response, Upstream);
 
 impl BufferedResponseReader {
-    async fn chunk(&mut self) -> reqwest::Result<Option<Bytes>> {
+    async fn chunk(&mut self) -> anyhow::Result<Option<Bytes>> {
         let mut buf = BytesMut::with_capacity(CHUNK_BUFFER_SIZE);
-        while let Some(chunk) = self.0.chunk().await? {
+        while let Some(chunk) = crate::upstream::chunk(&mut self.0, self.1).await? {
             buf.extend(chunk);
             if buf.len() > CHUNK_SIZE {
                 break;

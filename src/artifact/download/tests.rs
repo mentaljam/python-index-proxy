@@ -135,3 +135,42 @@ async fn cancelled_waiter_preserves_active_download_registration() {
     .await
     .expect("cancelled waiter must retain registration until safe cleanup");
 }
+
+#[tokio::test]
+async fn upstream_read_timeout_aborts_and_releases_download_budget() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        use futures::TryStreamExt;
+
+        for prefix in [0, CHUNK_SIZE + 1] {
+            let (state, root, response, upstream) = cancellation_fixture(prefix).await;
+            state.0.write().await.upstream.read_timeout = Duration::from_millis(50);
+            let permits = state.0.read().await.artifact_permits.clone();
+            let (reply, result) = oneshot::channel();
+            let owner = tokio::spawn(download_response(
+                state.0.clone(),
+                "artifact.whl".into(),
+                async move { Ok(Some(response)) },
+                reply,
+            ));
+            let error = match result.await.unwrap() {
+                Err(error) => error,
+                Ok(File::Stream(stream)) => stream.try_collect::<Vec<_>>().await.unwrap_err(),
+                Ok(_) => panic!("stalled transfer must fail"),
+            };
+            assert!(error.is::<crate::index::UpstreamIndexError>());
+            owner.await.unwrap();
+            upstream.await.unwrap();
+            assert_eq!(permits.available_permits(), 16);
+            assert!(state.0.read().await.download_locks.is_empty());
+            assert!(!root.join("artifact.whl").exists());
+            if prefix > 0 {
+                assert_eq!(std::fs::read_dir(root.join(".tmp")).unwrap().count(), 0);
+            }
+            if root.exists() {
+                std::fs::remove_dir_all(root).unwrap();
+            }
+        }
+    })
+    .await
+    .expect("read timeout must clean up stalled transfers");
+}

@@ -12,6 +12,7 @@ mod paths;
 mod settings;
 mod state;
 mod storage;
+mod upstream;
 
 #[cfg(test)]
 mod test_support;

@@ -63,7 +63,10 @@ impl State {
         hash: &str,
         file: &str,
     ) -> anyhow::Result<Option<reqwest::Response>> {
-        let http_client = self.0.read().await.http_client.clone();
+        let (http_client, upstream) = {
+            let data = self.0.read().await;
+            (data.http_client.clone(), data.upstream)
+        };
         let Some(detail) = self.package_detail(index, package, Some(hash)).await? else {
             return Ok(None);
         };
@@ -78,7 +81,7 @@ impl State {
             url.set_path(&format!("{}.metadata", url.path()));
         }
 
-        let response = http_client.get(url.clone()).send().await?;
+        let response = crate::upstream::send(&http_client, url.clone(), upstream).await?;
         if !response.status().is_success() {
             anyhow::bail!("Failed to get {url}")
         }

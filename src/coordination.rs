@@ -78,3 +78,14 @@ impl<T> Drop for FlightLease<T> {
         }
     }
 }
+
+#[derive(Debug)]
+pub(crate) struct ResourceLimit;
+
+impl std::fmt::Display for ResourceLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Concurrent work limit reached")
+    }
+}
+
+impl std::error::Error for ResourceLimit {}

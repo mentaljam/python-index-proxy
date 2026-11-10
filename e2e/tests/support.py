@@ -137,6 +137,7 @@ class Reply:
     content_type: str = "text/html; charset=utf-8"
     location: str | None = None
     transfer: TransferGate | None = None
+    content_encoding: str | None = None
 
 
 class TransferGate:
@@ -162,7 +163,7 @@ class TransferGate:
 class Upstream:
     __slots__ = ("lock", "requests", "routes", "server", "thread", "url")
 
-    def __init__(self) -> None:
+    def __init__(self) -> None:  # noqa: C901 - Local HTTP handler keeps fixture state isolated.
         self.routes: dict[str, Reply] = {}
         self.requests: list[str] = []
         self.lock = threading.Lock()
@@ -189,6 +190,8 @@ class Upstream:
                 self.send_response(reply.status)
                 self.send_header("Content-Type", reply.content_type)
                 self.send_header("Content-Length", str(len(reply.body)))
+                if reply.content_encoding is not None:
+                    self.send_header("Content-Encoding", reply.content_encoding)
                 if reply.location is not None:
                     self.send_header("Location", reply.location)
                 self.end_headers()
