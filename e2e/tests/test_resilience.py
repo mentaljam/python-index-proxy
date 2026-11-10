@@ -174,6 +174,9 @@ def test_overlapping_client_installs_complete_with_identical_artifacts(
     client: Client, proxy: Proxy, upstream: Upstream, tmp_path: Path
 ) -> None:
     wheel = large_app(upstream)
+    # Advertise metadata so uv does not intentionally cancel wheel range probes
+    # before installation. The shared GET below represents a complete download.
+    upstream.publish(wheel, metadata=True)
     gate = TransferGate()
     upstream.reply(
         f"/files/{wheel.filename}",
@@ -210,6 +213,9 @@ def test_overlapping_client_installs_complete_with_identical_artifacts(
         for candidate, python in environments:
             assert candidate.inspect(python) == EXPECTED
         assert proxy.get(artifact_url(proxy, wheel)) == wheel.content
+        assert upstream.artifact_requests().count(f"/files/{wheel.filename}") == 1, (
+            "overlapping installs must share one artifact fill within a replica"
+        )
         upstream.deny_artifacts()
         assert proxy.get(artifact_url(proxy, wheel)) == wheel.content
     finally:

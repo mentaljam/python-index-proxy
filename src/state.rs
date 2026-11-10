@@ -1,4 +1,12 @@
-use std::{collections::HashMap, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    pin::Pin,
+    sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use anyhow::Context;
 use bytes::{Bytes, BytesMut};
@@ -9,7 +17,7 @@ use opendal::Operator;
 use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 use reqwest::Client;
 use sha2::{Digest, Sha256};
-use tokio::sync::{RwLock, mpsc, oneshot};
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 use url::Url;
 
 use crate::settings::Settings;
@@ -73,7 +81,42 @@ impl State {
         let Some(url_templates) = url_templates else {
             return Ok(None);
         };
-        let mut parser = DetailParser::new(&base_url, index_slug, package);
+        let refreshes = self.0.read().await.index_refreshes.clone();
+        let lease = refreshes.lease(cache_key.clone());
+        let revision = lease.entry.revision.load(Ordering::Acquire);
+        let mut previous = lease.entry.result.lock().await;
+        if lease.entry.revision.load(Ordering::Acquire) != revision
+            && let Some(result) = previous.as_ref()
+        {
+            return share_refresh_result(result);
+        }
+        // Another request may have populated the cache before this lease was acquired.
+        if let Some(detail) = index_cache.get(&cache_key).await
+            && artifact_id.is_none_or(|id| detail.files.contains_key(id))
+        {
+            return Ok(Some(detail));
+        }
+        let result =
+            Self::fetch_package_detail(index_slug, package, &base_url, url_templates, http_client)
+                .await;
+        if let Ok(Some(detail)) = &result {
+            index_cache.insert(cache_key, detail.clone()).await;
+        }
+        let result = result.map_err(Arc::new);
+        let shared = share_refresh_result(&result);
+        *previous = Some(result);
+        lease.entry.revision.fetch_add(1, Ordering::Release);
+        shared
+    }
+
+    async fn fetch_package_detail(
+        index_slug: &str,
+        package: &str,
+        base_url: &str,
+        url_templates: Vec<IndexUrlTemplate>,
+        http_client: Client,
+    ) -> anyhow::Result<Option<Arc<PackageDetail>>> {
+        let mut parser = DetailParser::new(base_url, index_slug, package);
         for template in url_templates {
             let response = http_client
                 .get(template.package_url(package)?)
@@ -100,11 +143,7 @@ impl State {
             })
             .await??;
         }
-        let detail = parser.finalize().map(Arc::new);
-        if let Some(detail) = &detail {
-            index_cache.insert(cache_key, detail.clone()).await;
-        }
-        Ok(detail)
+        Ok(parser.finalize().map(Arc::new))
     }
 
     pub async fn get_file(
@@ -127,38 +166,44 @@ impl State {
         tracing::debug!("processing request for {file}");
         let object_path = artifact_path(&index, &package, &hash, &file);
 
-        let download_lock = {
-            let data = self.0.read().await;
-            data.download_locks.get(&hash).cloned()
-        };
-        if let Some(rw_lock) = download_lock {
-            tracing::debug!("already downloading {file}, waiting...");
-            // The active download needs the state write lock before releasing this lock.
-            let _ = rw_lock.read().await;
+        let storage = self.0.read().await.storage.clone();
+        if let Some(file) = stored_file(&storage, &object_path).await? {
+            return Ok(file);
         }
-
-        let data = self.0.read().await;
-        match data.storage.stat(&object_path).await {
-            Ok(_) => {
-                tracing::debug!("serving cached {file}");
-                return cached_file(&data.storage, &object_path).await;
+        let (reply, result) = oneshot::channel();
+        let state = self.clone();
+        let fetch = {
+            let state = self.clone();
+            async move {
+                state
+                    .artifact_response(&index, &package, &hash, &file)
+                    .await
             }
-            Err(err) if err.kind() == opendal::ErrorKind::NotFound => {}
-            Err(err) => return Err(err.into()),
-        }
-
-        let http_client = data.http_client.clone();
-        drop(data);
-        let Some(detail) = self.package_detail(&index, &package, Some(&hash)).await? else {
-            return Ok(File::None);
         };
-        let Some(source) = detail.files.get(&hash) else {
-            return Ok(File::None);
+        tokio::spawn(async move {
+            download_response(state.0, object_path, fetch, reply).await;
+        });
+        result.await?
+    }
+
+    async fn artifact_response(
+        &self,
+        index: &str,
+        package: &str,
+        hash: &str,
+        file: &str,
+    ) -> anyhow::Result<Option<reqwest::Response>> {
+        let http_client = self.0.read().await.http_client.clone();
+        let Some(detail) = self.package_detail(index, package, Some(hash)).await? else {
+            return Ok(None);
+        };
+        let Some(source) = detail.files.get(hash) else {
+            return Ok(None);
         };
         let mut url = Url::parse(&source.url)?;
         if file != source.filename {
             if file != format!("{}.metadata", source.filename) {
-                return Ok(File::None);
+                return Ok(None);
             }
             url.set_path(&format!("{}.metadata", url.path()));
         }
@@ -168,20 +213,7 @@ impl State {
             anyhow::bail!("Failed to get {url}")
         }
 
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .map_or("application/octet-stream", |h| {
-                h.to_str().unwrap_or("application/octet-stream")
-            })
-            .to_owned();
-
-        let (reply, result) = oneshot::channel();
-        let state = self.0.clone();
-        tokio::spawn(async move {
-            download_response(state, hash, object_path, content_type, response, reply).await;
-        });
-        result.await?
+        Ok(Some(response))
     }
 }
 
@@ -189,55 +221,71 @@ impl State {
 // closes its receiver; it never cancels an in-flight OpenDAL write operation.
 async fn download_response(
     state: Arc<RwLock<StateData>>,
-    hash: String,
     path: String,
-    content_type: String,
-    response: reqwest::Response,
+    fetch: impl Future<Output = anyhow::Result<Option<reqwest::Response>>> + Send,
     reply: oneshot::Sender<anyhow::Result<File>>,
 ) {
     let mut output = DownloadOutput {
         reply: Some(reply),
         body: None,
     };
-    let file_lock = tokio::select! {
+    let (locks, storage) = {
+        let data = state.read().await;
+        (data.download_locks.clone(), data.storage.clone())
+    };
+    let lease = locks.lease(path.clone());
+    let file_guard = tokio::select! {
         biased;
         _ = output.closed() => return,
-        lock = async { state.write().await.download_locks.entry(hash.clone()).or_default().clone() } => lock,
-    };
-    let mut file_guard = tokio::select! {
-        biased;
-        _ = output.closed() => None,
-        guard = file_lock.clone().write_owned() => Some(guard),
+        guard = lease.entry.lock() => guard,
     };
     let mut writer = None;
-    let result = if file_guard.is_some() {
-        let storage = state.read().await.storage.clone();
-        transfer_response(
-            response,
-            &storage,
-            &path,
-            &content_type,
-            &mut output,
-            &mut writer,
-        )
-        .await
-    } else {
-        drop(response);
-        // A cancelled waiter must not remove the active owner's registration.
-        // Wait only for cleanup; no upstream work continues here.
-        file_guard = Some(file_lock.clone().write_owned().await);
-        Ok(None)
-    };
-    // The response has been dropped before cleanup, stopping upstream reads.
+    let result = fill_artifact(&storage, &path, fetch, &mut output, &mut writer).await;
     if let Some(mut writer) = writer
         && let Err(err) = writer.abort().await
     {
         tracing::error!("Failed to abort artifact upload: {err}");
     }
-    remove_download_lock(&state, &hash, &file_lock).await;
     drop(file_guard);
+    drop(lease);
     // Publish errors only after cleanup: consumers need not poll after an error.
     output.finish(result).await;
+}
+
+async fn stored_file(storage: &Operator, path: &str) -> anyhow::Result<Option<File>> {
+    match storage.stat(path).await {
+        Ok(_) => Ok(Some(cached_file(storage, path).await?)),
+        Err(err) if err.kind() == opendal::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err.into()),
+    }
+}
+
+async fn fill_artifact(
+    storage: &Operator,
+    path: &str,
+    fetch: impl Future<Output = anyhow::Result<Option<reqwest::Response>>>,
+    output: &mut DownloadOutput,
+    writer: &mut Option<opendal::Writer>,
+) -> anyhow::Result<Option<File>> {
+    // Recheck after waiting: the previous owner may have completed this object.
+    if let Some(file) = stored_file(storage, path).await? {
+        return Ok(Some(file));
+    }
+    let response = tokio::select! {
+        biased;
+        _ = output.closed() => return Ok(None),
+        response = fetch => response?,
+    };
+    let Some(response) = response else {
+        return Ok(Some(File::None));
+    };
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_owned();
+    transfer_response(response, storage, path, &content_type, output, writer).await
 }
 
 async fn transfer_response(
@@ -378,15 +426,106 @@ impl DownloadOutput {
     }
 }
 
-async fn remove_download_lock(state: &RwLock<StateData>, hash: &str, lock: &Arc<RwLock<()>>) {
-    let mut data = state.write().await;
-    if data
-        .download_locks
-        .get(hash)
-        .is_some_and(|current| Arc::ptr_eq(current, lock))
-    {
-        data.download_locks.remove(hash);
+// Leases include both owners and waiters. A cancelled waiter cannot unregister
+// another request's mutex, and newcomers cannot bypass requests already queued.
+struct KeyedFlights<T> {
+    entries: Arc<StdMutex<HashMap<String, Arc<T>>>>,
+}
+
+impl<T> Clone for KeyedFlights<T> {
+    fn clone(&self) -> Self {
+        Self {
+            entries: self.entries.clone(),
+        }
     }
+}
+
+impl<T> Default for KeyedFlights<T> {
+    fn default() -> Self {
+        Self {
+            entries: Arc::new(StdMutex::new(HashMap::new())),
+        }
+    }
+}
+
+impl<T: Default> KeyedFlights<T> {
+    fn lease(&self, key: String) -> FlightLease<T> {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = entries.entry(key.clone()).or_default().clone();
+        FlightLease {
+            registry: self.clone(),
+            key,
+            entry,
+        }
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.entries.lock().unwrap().is_empty()
+    }
+
+    #[cfg(test)]
+    fn contains_key(&self, key: &str) -> bool {
+        self.entries.lock().unwrap().contains_key(key)
+    }
+}
+
+// No entry Arc escapes a lease; guards borrow it, so they drop before the lease.
+struct FlightLease<T> {
+    registry: KeyedFlights<T>,
+    key: String,
+    entry: Arc<T>,
+}
+
+impl<T> Drop for FlightLease<T> {
+    fn drop(&mut self) {
+        let mut entries = self
+            .registry
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if Arc::strong_count(&self.entry) == 2 {
+            entries.remove(&self.key);
+        }
+    }
+}
+
+type RefreshResult = Result<Option<Arc<PackageDetail>>, Arc<anyhow::Error>>;
+
+#[derive(Default)]
+struct IndexRefresh {
+    revision: AtomicU64,
+    result: Mutex<Option<RefreshResult>>,
+}
+
+#[derive(Debug)]
+struct SharedRefreshError(Arc<anyhow::Error>);
+
+impl std::fmt::Display for SharedRefreshError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for SharedRefreshError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref().as_ref())
+    }
+}
+
+fn share_refresh_result(result: &RefreshResult) -> anyhow::Result<Option<Arc<PackageDetail>>> {
+    result.clone().map_err(|error| {
+        let upstream = error.is::<UpstreamIndexError>();
+        let error = anyhow::Error::new(SharedRefreshError(error));
+        if upstream {
+            error.context(UpstreamIndexError)
+        } else {
+            error
+        }
+    })
 }
 
 impl TryFrom<Settings> for State {
@@ -426,7 +565,8 @@ impl TryFrom<Settings> for State {
             indices,
             indices_list,
             storage,
-            download_locks: HashMap::new(),
+            download_locks: KeyedFlights::default(),
+            index_refreshes: KeyedFlights::default(),
         };
 
         Ok(Self(Arc::new(data.into())))
@@ -469,7 +609,8 @@ struct StateData {
     indices: HashMap<String, Vec<IndexUrlTemplate>>,
     indices_list: String,
     storage: Operator,
-    download_locks: HashMap<String, Arc<RwLock<()>>>,
+    download_locks: KeyedFlights<Mutex<()>>,
+    index_refreshes: KeyedFlights<IndexRefresh>,
 }
 
 #[derive(Clone)]
@@ -730,6 +871,412 @@ fn format_indices_list(base_url: &str, indices: &HashMap<String, Vec<String>>) -
 mod storage_tests {
     use super::*;
     use futures::TryStreamExt;
+
+    #[tokio::test]
+    async fn concurrent_index_refreshes_share_uncacheable_stale_missing_and_error_results() {
+        use axum::{http::StatusCode, response::IntoResponse, routing::get};
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+        tokio::time::timeout(Duration::from_secs(15), async {
+            for (status, stale, cancel_owner) in [
+                (200, false, false),
+                (200, true, false),
+                (404, false, false),
+                (503, false, false),
+                (200, false, true),
+            ] {
+                let requests = Arc::new(AtomicUsize::new(0));
+                let current_status = Arc::new(AtomicUsize::new(status));
+                let paused = Arc::new(AtomicBool::new(true));
+                let started = Arc::new(tokio::sync::Notify::new());
+                let release = Arc::new(tokio::sync::Notify::new());
+                let app = axum::Router::new().route(
+                    "/simple/pkg/",
+                    get({
+                        let (requests, current_status, paused, started, release) = (
+                            requests.clone(),
+                            current_status.clone(),
+                            paused.clone(),
+                            started.clone(),
+                            release.clone(),
+                        );
+                        move || {
+                            let (requests, current_status, paused, started, release) = (
+                                requests.clone(),
+                                current_status.clone(),
+                                paused.clone(),
+                                started.clone(),
+                                release.clone(),
+                            );
+                            async move {
+                                requests.fetch_add(1, Ordering::SeqCst);
+                                if paused.swap(false, Ordering::SeqCst) {
+                                    started.notify_one();
+                                    release.notified().await;
+                                }
+                                (
+                                    StatusCode::from_u16(
+                                        current_status.load(Ordering::SeqCst) as u16
+                                    )
+                                    .unwrap(),
+                                    "<a href='/files/pkg.whl'>pkg.whl</a>",
+                                )
+                                    .into_response()
+                            }
+                        }
+                    }),
+                );
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let endpoint = format!("http://{}", listener.local_addr().unwrap());
+                let upstream =
+                    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+                let (state, root) =
+                    index_failure_state(vec![format!("{endpoint}/simple/{{package}}/")]);
+                // A one-byte budget cannot retain any parsed page. The shared in-flight
+                // result must still reach concurrent callers, including missing-ID refreshes.
+                state.0.write().await.index_cache = Cache::builder()
+                    .max_capacity(if stale { 1024 * 1024 } else { 1 })
+                    .weigher(|_: &String, value: &Arc<PackageDetail>| value.byte_len() as u32)
+                    .build();
+                if stale {
+                    let cache = state.0.read().await.index_cache.clone();
+                    cache
+                        .insert("default/pkg".into(), page(b"stale page"))
+                        .await;
+                    cache.run_pending_tasks().await;
+                    assert!(cache.get("default/pkg").await.is_some());
+                }
+                let first = tokio::spawn({
+                    let state = state.clone();
+                    async move {
+                        state
+                            .package_detail("default", "pkg", Some("missing-id"))
+                            .await
+                    }
+                });
+                started.notified().await;
+                let mut second =
+                    Box::pin(state.package_detail("default", "pkg", Some("missing-id")));
+                assert!(futures::poll!(&mut second).is_pending());
+                if cancel_owner {
+                    first.abort();
+                    assert!(first.await.err().unwrap().is_cancelled());
+                    let second = second.await.unwrap().unwrap();
+                    assert_eq!(second.files.len(), 1);
+                    release.notify_one();
+                } else {
+                    release.notify_one();
+                    let (first, second) = tokio::join!(first, second);
+                    let first = first.unwrap();
+                    match status {
+                        200 => {
+                            let first = first.unwrap().unwrap();
+                            let second = second.unwrap().unwrap();
+                            assert!(Arc::ptr_eq(&first, &second));
+                            assert_eq!(first.files.len(), 1);
+                        }
+                        404 => assert!(first.unwrap().is_none() && second.unwrap().is_none()),
+                        503 => {
+                            assert!(first.err().unwrap().is::<UpstreamIndexError>());
+                            assert!(second.err().unwrap().is::<UpstreamIndexError>());
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                let wave_requests = if cancel_owner { 2 } else { 1 };
+                assert_eq!(requests.load(Ordering::SeqCst), wave_requests);
+                assert!(state.0.read().await.index_refreshes.is_empty());
+                current_status.store(200, Ordering::SeqCst);
+                state.0.read().await.index_cache.run_pending_tasks().await;
+                assert!(
+                    state
+                        .package_detail("default", "pkg", Some("missing-id"))
+                        .await
+                        .unwrap()
+                        .is_some()
+                );
+                assert_eq!(
+                    requests.load(Ordering::SeqCst),
+                    wave_requests + 1,
+                    "no result is negatively cached across independent waves"
+                );
+                upstream.abort();
+                drop(state);
+                std::fs::remove_dir_all(root).unwrap();
+            }
+        })
+        .await
+        .expect("shared index refreshes must finish");
+    }
+
+    #[tokio::test]
+    async fn artifact_waiters_queue_before_upstream_response_headers() {
+        use axum::routing::get;
+        use std::sync::atomic::AtomicUsize;
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let requests = Arc::new(AtomicUsize::new(0));
+            let started = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let app = axum::Router::new()
+                .route(
+                    "/simple/pkg/",
+                    get(|| async { "<a href='/files/pkg.whl'>pkg.whl</a>" }),
+                )
+                .route(
+                    "/files/pkg.whl",
+                    get({
+                        let (requests, started, release) =
+                            (requests.clone(), started.clone(), release.clone());
+                        move || {
+                            let (requests, started, release) =
+                                (requests.clone(), started.clone(), release.clone());
+                            async move {
+                                if requests.fetch_add(1, Ordering::SeqCst) == 0 {
+                                    started.notify_one();
+                                    release.notified().await;
+                                }
+                                "complete artifact"
+                            }
+                        }
+                    }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let upstream = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let (state, root) =
+                index_failure_state(vec![format!("{endpoint}/simple/{{package}}/")]);
+            let detail = state
+                .package_detail("default", "pkg", None)
+                .await
+                .unwrap()
+                .unwrap();
+            let id = detail.files.keys().next().unwrap().clone();
+            let owner = tokio::spawn({
+                let state = state.clone();
+                let id = id.clone();
+                async move {
+                    state
+                        .get_file("default".into(), "pkg".into(), id, "pkg.whl".into())
+                        .await
+                }
+            });
+            started.notified().await;
+            let mut waiter = Box::pin(state.get_file(
+                "default".into(),
+                "pkg".into(),
+                id.clone(),
+                "pkg.whl".into(),
+            ));
+            let path = artifact_path("default", "pkg", &id, "pkg.whl");
+            loop {
+                assert!(futures::poll!(&mut waiter).is_pending());
+                assert_eq!(
+                    requests.load(Ordering::SeqCst),
+                    1,
+                    "waiter must not fetch while owner's headers are pending"
+                );
+                let locks = state.0.read().await.download_locks.clone();
+                if locks
+                    .entries
+                    .lock()
+                    .unwrap()
+                    .get(&path)
+                    .is_some_and(|entry| Arc::strong_count(entry) >= 3)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            release.notify_one();
+            let File::Bytes(first) = owner.await.unwrap().unwrap() else {
+                panic!("small owner response must be buffered");
+            };
+            let File::Stream(second) = waiter.await.unwrap() else {
+                panic!("waiter must use completed storage entry");
+            };
+            assert_eq!(first, b"complete artifact".as_slice());
+            assert_eq!(
+                second.try_collect::<Vec<_>>().await.unwrap().concat(),
+                b"complete artifact"
+            );
+            assert_eq!(requests.load(Ordering::SeqCst), 1);
+            assert!(state.0.read().await.download_locks.is_empty());
+            upstream.abort();
+            drop(state);
+            std::fs::remove_dir_all(root).unwrap();
+        })
+        .await
+        .expect("pre-header artifact coordination must finish");
+    }
+
+    #[tokio::test]
+    async fn artifact_waiters_recheck_storage_and_independent_objects_make_progress() {
+        coordinated_artifact_downloads(false).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_artifact_owner_allows_queued_request_to_retry() {
+        coordinated_artifact_downloads(true).await;
+    }
+
+    async fn coordinated_artifact_downloads(cancel_owner: bool) {
+        use axum::{extract::Path, response::IntoResponse, routing::get};
+        use std::sync::atomic::AtomicUsize;
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let requests = Arc::new(AtomicUsize::new(0));
+            let metadata_requests = Arc::new(AtomicUsize::new(0));
+            let started = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let bytes = Bytes::from(vec![42; CHUNK_SIZE * 2 + 17]);
+            let app = axum::Router::new()
+                .route(
+                    "/simple/{package}/",
+                    get(|| async { "<a href='/files/pkg.whl'>pkg.whl</a>" }),
+                )
+                .route(
+                    "/files/{file}",
+                    get({
+                        let (requests, metadata_requests, started, release, bytes) = (
+                            requests.clone(),
+                            metadata_requests.clone(),
+                            started.clone(),
+                            release.clone(),
+                            bytes.clone(),
+                        );
+                        move |Path(file): Path<String>| {
+                            let (requests, metadata_requests, started, release, bytes) = (
+                                requests.clone(),
+                                metadata_requests.clone(),
+                                started.clone(),
+                                release.clone(),
+                                bytes.clone(),
+                            );
+                            async move {
+                                if file.ends_with(".metadata") {
+                                    metadata_requests.fetch_add(1, Ordering::SeqCst);
+                                    return "metadata bytes".into_response();
+                                }
+                                let first = requests.fetch_add(1, Ordering::SeqCst) == 0;
+                                axum::body::Body::from_stream(async_stream::stream! {
+                                if first {
+                                    yield Ok::<_, std::io::Error>(bytes.slice(..CHUNK_SIZE + 1));
+                                    started.notify_one();
+                                    release.notified().await;
+                                    yield Ok(bytes.slice(CHUNK_SIZE + 1..));
+                                } else {
+                                    yield Ok::<_, std::io::Error>(bytes);
+                                }
+                            }).into_response()
+                            }
+                        }
+                    }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let upstream = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let (state, root) =
+                index_failure_state(vec![format!("{endpoint}/simple/{{package}}/")]);
+            let detail = state
+                .package_detail("default", "pkg", None)
+                .await
+                .unwrap()
+                .unwrap();
+            let id = detail.files.keys().next().unwrap().clone();
+            let File::Stream(mut owner) = state
+                .get_file("default".into(), "pkg".into(), id.clone(), "pkg.whl".into())
+                .await
+                .unwrap()
+            else {
+                panic!("large artifact must stream");
+            };
+            let first_chunk = owner.try_next().await.unwrap().unwrap();
+            started.notified().await;
+            let mut waiter = Box::pin(state.get_file(
+                "default".into(),
+                "pkg".into(),
+                id.clone(),
+                "pkg.whl".into(),
+            ));
+            assert!(futures::poll!(&mut waiter).is_pending());
+            let path = artifact_path("default", "pkg", &id, "pkg.whl");
+            loop {
+                let locks = state.0.read().await.download_locks.clone();
+                if locks
+                    .entries
+                    .lock()
+                    .unwrap()
+                    .get(&path)
+                    .is_some_and(|entry| Arc::strong_count(entry) >= 3)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+                assert!(futures::poll!(&mut waiter).is_pending());
+            }
+            assert_eq!(requests.load(Ordering::SeqCst), 1);
+            if cancel_owner {
+                drop(owner);
+                let File::Stream(stream) = waiter.await.unwrap() else {
+                    panic!("waiter must retry cancelled fill");
+                };
+                assert_eq!(
+                    stream.try_collect::<Vec<_>>().await.unwrap().concat(),
+                    bytes.as_ref()
+                );
+                assert_eq!(requests.load(Ordering::SeqCst), 2);
+            } else {
+                let File::Bytes(metadata) = state
+                    .get_file(
+                        "default".into(),
+                        "pkg".into(),
+                        id.clone(),
+                        "pkg.whl.metadata".into(),
+                    )
+                    .await
+                    .unwrap()
+                else {
+                    panic!("metadata must not wait for wheel");
+                };
+                assert_eq!(metadata, b"metadata bytes".as_slice());
+                assert_eq!(metadata_requests.load(Ordering::SeqCst), 1);
+                // The same source in another package context has a distinct object key.
+                let File::Stream(other) = state
+                    .get_file("default".into(), "other".into(), id, "pkg.whl".into())
+                    .await
+                    .unwrap()
+                else {
+                    panic!("other context must progress");
+                };
+                assert_eq!(
+                    other.try_collect::<Vec<_>>().await.unwrap().concat(),
+                    bytes.as_ref()
+                );
+                release.notify_one();
+                let mut chunks = vec![first_chunk];
+                chunks.extend(owner.try_collect::<Vec<_>>().await.unwrap());
+                assert_eq!(chunks.concat(), bytes.as_ref());
+                let File::Stream(stream) = waiter.await.unwrap() else {
+                    panic!("completed artifact must be served from storage");
+                };
+                assert_eq!(
+                    stream.try_collect::<Vec<_>>().await.unwrap().concat(),
+                    bytes.as_ref()
+                );
+                assert_eq!(
+                    requests.load(Ordering::SeqCst),
+                    2,
+                    "only one fetch per distinct object"
+                );
+            }
+            release.notify_one();
+            assert!(state.0.read().await.download_locks.is_empty());
+            assert_eq!(std::fs::read_dir(root.join(".tmp")).unwrap().count(), 0);
+            upstream.abort();
+            drop(state);
+            std::fs::remove_dir_all(root).unwrap();
+        })
+        .await
+        .expect("coordinated artifact downloads must finish");
+    }
 
     #[derive(Debug, Clone)]
     struct StatFailureLayer {
@@ -1726,15 +2273,20 @@ mod storage_tests {
                 let (reply, result) = oneshot::channel();
                 let mut download = Box::pin(download_response(
                     state.0.clone(),
-                    "test-id".into(),
                     "artifact.whl".into(),
-                    "application/octet-stream".into(),
-                    response,
+                    async move { Ok(Some(response)) },
                     reply,
                 ));
                 assert!(futures::poll!(&mut download).is_pending());
                 if prefix_size == 0 {
-                    assert!(state.0.read().await.download_locks.contains_key("test-id"));
+                    assert!(
+                        state
+                            .0
+                            .read()
+                            .await
+                            .download_locks
+                            .contains_key("artifact.whl")
+                    );
                     drop(result);
                     download.await;
                 } else {
@@ -1769,33 +2321,23 @@ mod storage_tests {
     async fn cancelled_waiter_preserves_active_download_registration() {
         tokio::time::timeout(Duration::from_secs(10), async {
             let (state, root, response, upstream) = cancellation_fixture(0).await;
-            let lock = Arc::new(RwLock::new(()));
-            let active = lock.clone().write_owned().await;
-            state
-                .0
-                .write()
-                .await
-                .download_locks
-                .insert("test-id".into(), lock.clone());
+            let locks = state.0.read().await.download_locks.clone();
+            let lease = locks.lease("artifact.whl".into());
+            let active = lease.entry.lock().await;
             let (reply, result) = oneshot::channel();
             let mut download = Box::pin(download_response(
                 state.0.clone(),
-                "test-id".into(),
                 "artifact.whl".into(),
-                "application/octet-stream".into(),
-                response,
+                async move { Ok(Some(response)) },
                 reply,
             ));
             assert!(futures::poll!(&mut download).is_pending());
             drop(result);
-            assert!(futures::poll!(&mut download).is_pending());
-            upstream.await.unwrap();
-            assert!(Arc::ptr_eq(
-                state.0.read().await.download_locks.get("test-id").unwrap(),
-                &lock
-            ));
-            drop(active);
             download.await;
+            upstream.await.unwrap();
+            assert!(locks.contains_key("artifact.whl"));
+            drop(active);
+            drop(lease);
             assert!(state.0.read().await.download_locks.is_empty());
             drop(state);
             std::fs::remove_dir_all(root).unwrap();
@@ -1965,14 +2507,10 @@ mod storage_tests {
         settings.storage = crate::storage::Storage::Fs(config);
         let state = State::try_from(settings).unwrap();
         let hash = "abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab";
-        let file_lock = Arc::new(RwLock::new(()));
-        let active_download = file_lock.write().await;
-        state
-            .0
-            .write()
-            .await
-            .download_locks
-            .insert(hash.into(), file_lock.clone());
+        let locks = state.0.read().await.download_locks.clone();
+        let path = artifact_path("default", "package", hash, "package.whl");
+        let lease = locks.lease(path);
+        let active_download = lease.entry.lock().await;
 
         let mut waiting_download = Box::pin(state.get_file(
             "default".into(),
@@ -1991,12 +2529,12 @@ mod storage_tests {
             .await
             .unwrap();
         // The active download must be able to clean up while retaining its file lock.
-        let mut data = tokio::time::timeout(Duration::from_secs(1), state.0.write())
+        let data = tokio::time::timeout(Duration::from_secs(1), state.0.write())
             .await
             .expect("waiting request must not block active download cleanup");
-        data.download_locks.remove(hash);
         drop(data);
         drop(active_download);
+        drop(lease);
 
         let file = tokio::time::timeout(Duration::from_secs(1), &mut waiting_download)
             .await

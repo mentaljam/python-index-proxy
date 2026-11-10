@@ -108,7 +108,9 @@ Both tools target the project's minimum Python version, 3.12.
   upstream response is paused. Both installations must finish with correct
   module behavior and cached bytes. A local forwarding observer confirms both
   client requests have been sent before release; this is not an assertion about
-  exact upstream fetch counts or internal lock scheduling.
+  internal lock scheduling. The completed installations must share exactly one
+  upstream GET for their common wheel within this replica. This fixture advertises
+  PEP 658 metadata so uv does not need separate, intentionally canceled wheel probes.
 - Real clients skip incompatible `data-requires-python` candidates and yanked
   candidates for an unconstrained requirement. Direct-upstream controls use the
   same candidate pages, then proxy installations verify the chosen version and
