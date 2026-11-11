@@ -135,12 +135,14 @@ impl State {
             // A started blocking parse survives cancellation of its async caller.
             let parsing_permit = permit.clone();
             // Parsing is CPU-bound and must not monopolize an async worker.
-            parser = tokio::task::spawn_blocking(move || {
-                let _permit = parsing_permit;
-                parser.parse_html(&final_url, &content)?;
-                Ok::<_, anyhow::Error>(parser)
-            })
-            .await??;
+            parser = data
+                .shutdown
+                .spawn_blocking(move || {
+                    let _permit = parsing_permit;
+                    parser.parse_html(&final_url, &content)?;
+                    Ok::<_, anyhow::Error>(parser)
+                })
+                .await??;
         }
         Ok(parser.finalize().map(Arc::new))
     }

@@ -11,6 +11,22 @@ Run the proxy against the local Silo setup with `cargo run -- settings.local.tom
 Generate a documented configuration with `cargo run -- --print-settings-template`.
 Generation is controlled by the `config-template` feature, enabled by default.
 
+## Process shutdown
+
+SIGTERM and SIGINT stop accepting new connections. Existing requests have up to
+25 seconds to finish; then requests and artifact fills are cancelled, with up to
+5 more seconds for owned tasks and upload cleanup. These periods are fixed.
+The process exits early once HTTP connections, downloads and started parsers have
+finished. Exit code 0 indicates completed draining; an exceeded final deadline
+exits with code 1. A backend operation that remains stuck can prevent cleanup
+before this forced exit; unfinished uploads are not guaranteed to be removed.
+
+Local process tests cover idle shutdown, a transfer finishing during grace, and
+a stalled transfer cancelled with temporary-file cleanup and a successful retry
+after restart. Private subprocess tests cover the hard deadline and blocking
+runtime work without adding production test hooks. These checks do not exercise
+Kubernetes or cloud storage.
+
 ## Index roots
 
 `/{index}/` is an informational HTML page with pip and uv connection examples.

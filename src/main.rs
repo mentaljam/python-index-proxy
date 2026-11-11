@@ -1,4 +1,4 @@
-use tokio::{net::TcpListener, signal};
+use tokio::net::TcpListener;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::{http::get_router, settings::Settings};
@@ -10,6 +10,7 @@ mod http;
 mod index;
 mod paths;
 mod settings;
+mod shutdown;
 mod state;
 mod storage;
 mod upstream;
@@ -44,54 +45,19 @@ async fn main() {
         }
     }
 
-    if let Err(err) = serve().await {
-        tracing::error!("{err:#}");
-        std::process::exit(1);
-    }
+    shutdown::exit(serve().await);
 }
 
 async fn serve() -> anyhow::Result<()> {
     let settings = Settings::new()?;
     let bind = settings.bind;
-    let router = get_router(&settings.path_prefix);
+    let path_prefix = settings.path_prefix.clone();
     let state: state::State = settings.try_into()?;
+    let shutdown = state.0.shutdown.clone();
+    let router = get_router(&path_prefix);
 
     let listener = TcpListener::bind(bind).await?;
     tracing::info!("Listening on http://{bind}");
 
-    axum::serve(listener, router.with_state(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
-
-    tracing::info!("Finished");
-
-    Ok(())
-}
-
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
-    };
-
-    #[cfg(unix)]
-    let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("failed to install signal handler")
-            .recv()
-            .await;
-    };
-
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-
-    tracing::info!("Started");
-
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
-    }
-
-    tracing::info!("Stopping");
+    shutdown.serve(listener, router.with_state(state)).await
 }

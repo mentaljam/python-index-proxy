@@ -143,18 +143,19 @@ class Reply:
 class TransferGate:
     """Pause a response after an observable prefix, with bounded shutdown."""
 
-    __slots__ = ("release", "started")
+    __slots__ = ("release", "started", "timeout")
 
-    def __init__(self) -> None:
+    def __init__(self, timeout: float = 15) -> None:
         self.started = threading.Event()
         self.release = threading.Event()
+        self.timeout = timeout
 
     def send(self, handler: BaseHTTPRequestHandler, body: bytes) -> None:
         midpoint = len(body) // 2
         handler.wfile.write(body[:midpoint])
         handler.wfile.flush()
         self.started.set()
-        if not self.release.wait(15):
+        if not self.release.wait(self.timeout):
             handler.close_connection = True
             return
         handler.wfile.write(body[midpoint:])

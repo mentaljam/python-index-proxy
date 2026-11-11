@@ -10,6 +10,7 @@ use crate::{
     coordination::KeyedFlights,
     index::{IndexRefresh, IndexUrlTemplate, PackageDetail, format_indices_list},
     settings::{Limits, Settings, Upstream},
+    shutdown::Shutdown,
 };
 
 #[derive(Clone)]
@@ -57,6 +58,7 @@ impl TryFrom<Settings> for State {
         let storage = storage.operator()?;
 
         let data = StateData {
+            shutdown: Shutdown::default(),
             public_url,
             http_client: Client::builder()
                 .connect_timeout(upstream.connect_timeout)
@@ -78,6 +80,7 @@ impl TryFrom<Settings> for State {
 }
 
 pub(crate) struct StateData {
+    pub(crate) shutdown: Shutdown,
     pub(crate) limits: Limits,
     pub(crate) upstream: Upstream,
     pub(crate) index_permits: Arc<Semaphore>,

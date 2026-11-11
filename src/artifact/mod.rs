@@ -45,7 +45,7 @@ impl State {
         }
         let (reply, result) = oneshot::channel();
         let state = self.clone();
-        tokio::spawn(async move {
+        self.0.shutdown.spawn(async move {
             let fetch = state.artifact_response(&index, &package, &hash, &file);
             download_response(&state.0, object_path, fetch, reply).await;
         });

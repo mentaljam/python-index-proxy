@@ -4,7 +4,9 @@ use bytes::{Bytes, BytesMut};
 use opendal::Operator;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{coordination::ResourceLimit, settings::Upstream, state::StateData};
+use crate::{
+    coordination::ResourceLimit, settings::Upstream, shutdown::Shutdown, state::StateData,
+};
 
 use super::{File, cached_file};
 
@@ -20,6 +22,7 @@ pub(super) async fn download_response(
     reply: oneshot::Sender<anyhow::Result<File>>,
 ) {
     let mut output = DownloadOutput {
+        shutdown: state.shutdown.clone(),
         reply: Some(reply),
         body: None,
     };
@@ -35,7 +38,12 @@ pub(super) async fn download_response(
     let result = async {
         // Same-key waiters can use a completed object even while other fills
         // exhaust the global budget. Only a new fill needs a permit.
-        if let Some(file) = stored_file(storage, &path).await? {
+        let cached = tokio::select! {
+            biased;
+            _ = output.closed() => return Ok(None),
+            cached = stored_file(storage, &path) => cached?,
+        };
+        if let Some(file) = cached {
             return Ok(Some(file));
         }
         permit = Some(
@@ -178,12 +186,16 @@ async fn transfer_response(
 type DownloadChunk = anyhow::Result<(Bytes, oneshot::Sender<()>)>;
 
 struct DownloadOutput {
+    shutdown: Shutdown,
     reply: Option<oneshot::Sender<anyhow::Result<File>>>,
     body: Option<mpsc::Sender<DownloadChunk>>,
 }
 
 impl DownloadOutput {
     fn is_closed(&self) -> bool {
+        if self.shutdown.is_cancelled() {
+            return true;
+        }
         match &self.body {
             Some(body) => body.is_closed(),
             None => self.reply.as_ref().is_none_or(oneshot::Sender::is_closed),
@@ -191,11 +203,20 @@ impl DownloadOutput {
     }
 
     async fn closed(&mut self) {
-        if let Some(body) = &self.body {
-            body.closed().await;
-        } else if let Some(reply) = &mut self.reply {
-            reply.closed().await;
-        }
+        let Self {
+            shutdown,
+            body,
+            reply,
+        } = self;
+        let _ = shutdown
+            .until_cancelled(async {
+                if let Some(body) = body {
+                    body.closed().await;
+                } else if let Some(reply) = reply {
+                    reply.closed().await;
+                }
+            })
+            .await;
     }
 
     fn start_stream(&mut self) -> bool {
@@ -223,11 +244,16 @@ impl DownloadOutput {
         let Some(body) = &self.body else {
             return false;
         };
-        if body.send(Ok((bytes, consumed))).await.is_err() {
-            return false;
-        }
-        // Do not prefetch: resume upstream reads only when the body asks for more.
-        acknowledgement.await.is_ok()
+        self.shutdown
+            .until_cancelled(async {
+                if body.send(Ok((bytes, consumed))).await.is_err() {
+                    return false;
+                }
+                // Resume upstream reads only when the body asks for more.
+                acknowledgement.await.is_ok()
+            })
+            .await
+            .unwrap_or(false)
     }
 
     async fn finish(mut self, result: anyhow::Result<Option<File>>) {
@@ -241,7 +267,7 @@ impl DownloadOutput {
                 if let Some(reply) = self.reply.take() {
                     let _ = reply.send(Err(err));
                 } else if let Some(body) = self.body.take() {
-                    let _ = body.send(Err(err)).await;
+                    let _ = self.shutdown.until_cancelled(body.send(Err(err))).await;
                 }
             }
             Ok(None) => {}
