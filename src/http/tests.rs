@@ -34,6 +34,7 @@ impl opendal::raw::Service for StatFailureService {
     type Lister = opendal::raw::oio::Lister;
     type Deleter = opendal::raw::oio::Deleter;
     type Copier = opendal::raw::oio::Copier;
+    type Composer = opendal::raw::oio::Composer;
 
     fn info(&self) -> opendal::raw::ServiceInfo {
         self.inner.info()
@@ -104,9 +105,8 @@ impl opendal::raw::Service for StatFailureService {
         from: &str,
         to: &str,
         args: opendal::raw::OpCopy,
-        opts: opendal::raw::OpCopier,
     ) -> opendal::Result<Self::Copier> {
-        self.inner.copy(ctx, from, to, args, opts)
+        self.inner.copy(ctx, from, to, args)
     }
 
     async fn rename(
