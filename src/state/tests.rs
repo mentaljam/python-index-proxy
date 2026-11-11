@@ -57,7 +57,7 @@ async fn uncacheable_package_details_remain_usable_for_the_current_request() {
         settings.storage = crate::storage::Storage::Fs(storage);
         let state = crate::state::State::try_from(settings).unwrap();
         let detail = state
-            .package_detail("default", "pkg", None)
+            .package_detail("default", &"pkg".parse().unwrap(), None)
             .await
             .unwrap()
             .unwrap();
@@ -112,7 +112,7 @@ async fn stale_cached_page_refreshes_for_an_unknown_artifact_identifier() {
         let upstream = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let (state, root) = index_failure_state(vec![format!("{endpoint}/simple/{{package}}/")]);
         let fresh = state
-            .package_detail("default", "pkg", None)
+            .package_detail("default", &"pkg".parse().unwrap(), None)
             .await
             .unwrap()
             .unwrap();
@@ -123,7 +123,7 @@ async fn stale_cached_page_refreshes_for_an_unknown_artifact_identifier() {
             files: [(
                 "f".repeat(64),
                 ArtifactSource {
-                    url: format!("{endpoint}/files/old.whl"),
+                    url: format!("{endpoint}/files/old.whl").parse().unwrap(),
                     filename: "old.whl".into(),
                 },
             )]

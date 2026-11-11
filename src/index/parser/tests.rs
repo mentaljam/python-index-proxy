@@ -66,7 +66,8 @@ fn tokenizer_ignores_apparent_links_in_raw_text_and_rcdata() {
         assert_eq!(detail.files.len(), 1, "{tag}");
         let source = detail.files.values().next().unwrap();
         assert_eq!(
-            source.url, "https://index.example/simple/pkg/real.whl",
+            source.url.as_str(),
+            "https://index.example/simple/pkg/real.whl",
             "{tag}"
         );
         let html = std::str::from_utf8(&detail.html).unwrap();
@@ -117,7 +118,7 @@ fn rewritten_file_links_preserve_fragments_and_resolve_sources() {
         .find(|source| source.filename == "pkg.whl")
         .unwrap();
     assert_eq!(
-        source.url,
+        source.url.as_str(),
         "https://index.example.test/files/pkg.whl?download=1&x=2"
     );
     let other = render_html(

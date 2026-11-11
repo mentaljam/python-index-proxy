@@ -14,7 +14,7 @@ use uv_normalize::PackageName;
 use crate::{
     coordination::ResourceLimit,
     index::project::PreparedProject,
-    paths::{encode_segment, valid_index_name},
+    paths::encode_segment,
     settings::{Index, IndexPolicy},
     state::State,
 };
@@ -54,6 +54,9 @@ impl State {
         index_slug: String,
         package: String,
     ) -> anyhow::Result<Option<Bytes>> {
+        let Ok(package) = package.parse::<PackageName>() else {
+            return Ok(None);
+        };
         Ok(self
             .package_detail(&index_slug, &package, None)
             .await?
@@ -63,20 +66,16 @@ impl State {
     pub(crate) async fn package_detail(
         &self,
         index_slug: &str,
-        package: &str,
+        package: &PackageName,
         artifact_id: Option<&str>,
     ) -> anyhow::Result<Option<Arc<PackageDetail>>> {
-        if !valid_index_name(index_slug) {
-            return Ok(None);
-        }
-        let Ok(package) = package.parse::<PackageName>() else {
+        let Some(url_templates) = self.0.indices.get(index_slug) else {
             return Ok(None);
         };
         let package = package.as_str();
         crate::logging::package(index_slug, package);
         let data = &self.0;
         let index_cache = &data.index_cache;
-        let url_templates = data.indices.get(index_slug);
         let cache_key = format!("{}/{}", encode_segment(index_slug), encode_segment(package));
         if let Some(detail) = index_cache.get(&cache_key).await
             && artifact_id.is_none_or(|id| detail.files.contains_key(id))
@@ -84,9 +83,6 @@ impl State {
             crate::logging::cache("index", "hit");
             return Ok(Some(detail));
         }
-        let Some(url_templates) = url_templates else {
-            return Ok(None);
-        };
         crate::logging::cache("index", "miss");
         let lease = data.index_refreshes.lease(cache_key.clone());
         let revision = lease.entry.revision.load(Ordering::Acquire);
@@ -286,7 +282,7 @@ impl IndexUrlTemplate {
 }
 
 pub(crate) struct ArtifactSource {
-    pub(crate) url: String,
+    pub(crate) url: Url,
     pub(crate) filename: String,
 }
 pub(crate) struct PackageDetail {
@@ -300,7 +296,7 @@ impl PackageDetail {
             self.html.len().saturating_add(self.json.len()),
             |size, (hash, source)| {
                 size.saturating_add(hash.len())
-                    .saturating_add(source.url.len())
+                    .saturating_add(source.url.as_str().len())
                     .saturating_add(source.filename.len())
             },
         )

@@ -53,6 +53,9 @@ async fn get_detail(
     let Some(content_type) = negotiate(&headers) else {
         return (StatusCode::NOT_ACCEPTABLE, [(header::VARY, "Accept")]).into_response();
     };
+    let Ok(package) = package.parse::<uv_normalize::PackageName>() else {
+        return (StatusCode::NOT_FOUND, [(header::VARY, "Accept")]).into_response();
+    };
     let mut response = match state.package_detail(&index, &package, None).await {
         Ok(Some(detail)) => {
             let body = if content_type == crate::models::JSON_TYPE {

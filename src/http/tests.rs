@@ -368,7 +368,7 @@ async fn upstream_index_failures_return_bad_gateway_without_caching_partial_page
         assert!(state.0.index_cache.get("default/pkg").await.is_none());
         recovering_status.store(200, Ordering::SeqCst);
         let detail = state
-            .package_detail("default", "pkg", None)
+            .package_detail("default", &"pkg".parse().unwrap(), None)
             .await
             .unwrap()
             .unwrap();

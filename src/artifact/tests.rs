@@ -45,7 +45,7 @@ async fn artifact_waiters_queue_before_upstream_response_headers() {
         let upstream = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let (state, root) = index_failure_state(vec![format!("{endpoint}/simple/{{package}}/")]);
         let detail = state
-            .package_detail("default", "pkg", None)
+            .package_detail("default", &"pkg".parse().unwrap(), None)
             .await
             .unwrap()
             .unwrap();
@@ -166,7 +166,7 @@ async fn coordinated_artifact_downloads(cancel_owner: bool) {
         let upstream = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let (state, root) = index_failure_state(vec![format!("{endpoint}/simple/{{package}}/")]);
         let detail = state
-            .package_detail("default", "pkg", None)
+            .package_detail("default", &"pkg".parse().unwrap(), None)
             .await
             .unwrap()
             .unwrap();
@@ -384,7 +384,7 @@ async fn failed_download_fixture(
         files: [(
             "abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab".into(),
             ArtifactSource {
-                url,
+                url: url.parse().unwrap(),
                 filename: "package.whl".into(),
             },
         )]
@@ -589,7 +589,7 @@ async fn s3_cache_hit_presigns_existing_object_path() {
     let File::PresignedUrl(url) = cached_file(&storage, "ab/cd/package.whl").await.unwrap() else {
         panic!("S3 cache hits must redirect when signature needs no extra headers")
     };
-    let url = Url::parse(&url).unwrap();
+    let url = url::Url::parse(&url).unwrap();
     assert_eq!(url.host_str(), Some("objects.example.test"));
     assert_eq!(url.path(), "/packages/ab/cd/package.whl");
     assert!(url.query_pairs().any(|(name, _)| name == "X-Amz-Signature"));

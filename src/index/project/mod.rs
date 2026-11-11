@@ -90,7 +90,7 @@ impl PackageProject {
                 source_url.set_fragment(None);
                 let url = format!("{}{}/{}", link_base, id, encode_segment(&metadata.filename));
                 let source = ArtifactSource {
-                    url: source_url.to_string(),
+                    url: source_url,
                     filename: metadata.filename.clone(),
                 };
                 PreparedFile {

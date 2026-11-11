@@ -4,11 +4,10 @@ use bytes::Bytes;
 use futures::{Stream, TryStreamExt};
 use opendal::Operator;
 use tokio::sync::oneshot;
-use url::Url;
 use uv_normalize::PackageName;
 
 use crate::{
-    paths::{artifact_path, valid_filename, valid_index_name},
+    paths::{artifact_path, valid_filename},
     state::State,
 };
 
@@ -30,15 +29,11 @@ impl State {
         let Ok(package) = PackageName::from_owned(package) else {
             return Ok(File::None);
         };
-        let package = package.to_string();
-        if !valid_index_name(&index)
-            || !valid_filename(&file)
-            || !self.0.indices.contains_key(&index)
-        {
+        if !valid_filename(&file) || !self.0.indices.contains_key(&index) {
             return Ok(File::None);
         }
-        crate::logging::package(&index, &package);
-        let object_path = artifact_path(&index, &package, &hash, &file);
+        crate::logging::package(&index, package.as_str());
+        let object_path = artifact_path(&index, package.as_str(), &hash, &file);
 
         crate::logging::cache("artifact", "lookup");
         if let Some(file) = stored_file(&self.0.storage, &object_path).await? {
@@ -60,7 +55,7 @@ impl State {
     async fn artifact_response(
         &self,
         index: &str,
-        package: &str,
+        package: &PackageName,
         hash: &str,
         file: &str,
     ) -> anyhow::Result<Option<reqwest::Response>> {
@@ -70,7 +65,7 @@ impl State {
         let Some(source) = detail.files.get(hash) else {
             return Ok(None);
         };
-        let mut url = Url::parse(&source.url)?;
+        let mut url = source.url.clone();
         if file != source.filename {
             if file != format!("{}.metadata", source.filename) {
                 return Ok(None);

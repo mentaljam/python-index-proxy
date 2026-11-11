@@ -83,12 +83,14 @@ async fn concurrent_index_refreshes_share_uncacheable_stale_missing_and_error_re
                 let state = state.clone();
                 async move {
                     state
-                        .package_detail("default", "pkg", Some("missing-id"))
+                        .package_detail("default", &"pkg".parse().unwrap(), Some("missing-id"))
                         .await
                 }
             });
             started.notified().await;
-            let mut second = Box::pin(state.package_detail("default", "pkg", Some("missing-id")));
+            let package = "pkg".parse().unwrap();
+            let mut second =
+                Box::pin(state.package_detail("default", &package, Some("missing-id")));
             assert!(futures::poll!(&mut second).is_pending());
             if cancel_owner {
                 first.abort();
@@ -122,7 +124,7 @@ async fn concurrent_index_refreshes_share_uncacheable_stale_missing_and_error_re
             state.0.index_cache.run_pending_tasks().await;
             assert!(
                 state
-                    .package_detail("default", "pkg", Some("missing-id"))
+                    .package_detail("default", &"pkg".parse().unwrap(), Some("missing-id"))
                     .await
                     .unwrap()
                     .is_some()
@@ -220,11 +222,11 @@ async fn slow_index_fetch_does_not_block_unrelated_requests() {
         let mut urls = Vec::new();
         for package in ["fast", "slow"] {
             let detail = state
-                .package_detail("default", package, None)
+                .package_detail("default", &package.parse().unwrap(), None)
                 .await
                 .unwrap()
                 .unwrap();
-            urls.extend(detail.files.values().map(|source| source.url.clone()));
+            urls.extend(detail.files.values().map(|source| source.url.to_string()));
         }
         urls.sort();
         assert_eq!(
@@ -284,7 +286,7 @@ async fn index_cache_capacity_counts_key_and_payload_bytes() {
         files: [(
             "abc".into(),
             ArtifactSource {
-                url: "1234".into(),
+                url: "https://x/".parse().unwrap(),
                 filename: "12345".into(),
             },
         )]
@@ -441,7 +443,9 @@ async fn source_policy_selects_pages_in_order_and_never_falls_back_on_errors() {
                 .get_mut("default")
                 .unwrap()
                 .policy = policy;
-            let result = state.package_detail("default", "pkg", None).await;
+            let result = state
+                .package_detail("default", &"pkg".parse().unwrap(), None)
+                .await;
             if let Some(expected) = expected {
                 let detail = result.unwrap().unwrap();
                 let mut names: Vec<_> = detail
@@ -452,7 +456,7 @@ async fn source_policy_selects_pages_in_order_and_never_falls_back_on_errors() {
                 names.sort_unstable();
                 assert_eq!(names, expected, "{policy:?} / {status} / {body}");
                 let cached = state
-                    .package_detail("default", "pkg", None)
+                    .package_detail("default", &"pkg".parse().unwrap(), None)
                     .await
                     .unwrap()
                     .unwrap();
