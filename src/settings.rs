@@ -8,6 +8,13 @@ use crate::storage::Storage;
 #[derive(Deserialize, Serialize)]
 #[cfg_attr(feature = "config-template", derive(toml_example::TomlExample))]
 pub struct Settings {
+    /// Log format: "text" for human-readable output or "json" for one JSON object per line.
+    /// Logs go to stdout; RUST_LOG controls filtering (INFO by default).
+    /// Configuration loading errors are written as text to stderr.
+    #[serde(default)]
+    #[cfg_attr(feature = "config-template", toml_example(default = "text"))]
+    pub log_format: LogFormat,
+
     /// HTTP listen address, including the port; IPv6 addresses use [address]:port.
     /// This address is also used in generated links when public_url is omitted.
     #[serde(default = "defaults::bind")]
@@ -97,6 +104,7 @@ impl Settings {
     #[cfg(test)]
     pub fn for_test() -> Self {
         Self {
+            log_format: LogFormat::default(),
             bind: defaults::bind(),
             path_prefix: defaults::path_prefix(),
             public_url: None,
@@ -108,6 +116,14 @@ impl Settings {
             storage: crate::storage::Storage::filesystem_template(),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    #[default]
+    Text,
+    Json,
 }
 
 #[derive(Deserialize, Serialize, Default)]
