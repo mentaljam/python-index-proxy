@@ -122,7 +122,10 @@ impl Shutdown {
 
 pub(crate) fn exit(result: anyhow::Result<()>) -> ! {
     if let Err(err) = result {
-        tracing::error!("{err:#}");
+        tracing::error!(
+            error = crate::logging::error_kind(&err),
+            "Application failed"
+        );
         std::process::exit(1);
     }
     // Explicitly drained HTTP requests and owned work are complete. Do not let

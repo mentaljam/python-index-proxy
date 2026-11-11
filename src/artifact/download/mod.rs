@@ -44,6 +44,7 @@ pub(super) async fn download_response(
             cached = stored_file(storage, &path) => cached?,
         };
         if let Some(file) = cached {
+            crate::logging::cache("artifact", "shared");
             return Ok(Some(file));
         }
         permit = Some(
@@ -67,12 +68,19 @@ pub(super) async fn download_response(
     if let Some(mut writer) = writer
         && let Err(err) = writer.abort().await
     {
-        tracing::error!("Failed to abort artifact upload: {err}");
+        let error = anyhow::Error::from(err);
+        tracing::error!(
+            error = crate::logging::error_kind(&error),
+            "Failed to abort artifact upload"
+        );
     }
     drop(permit);
     drop(file_guard);
     drop(lease);
     // Publish errors only after cleanup: consumers need not poll after an error.
+    if let Err(error) = &result {
+        crate::logging::record_error(error);
+    }
     output.finish(result).await;
 }
 

@@ -26,6 +26,7 @@ futures = { version = "^0.3", default-features = false, features = [
 hex = "^0.4"
 html5gum = { version = "0.9.1", default-features = false }
 http = "1"
+http-body = "1"
 humantime-serde = "^1.1"
 moka = { version = "^0.12", features = ["future"] }
 opendal = { version = "^0.59", default-features = false, features = [
@@ -72,6 +73,7 @@ uv-normalize = "0.0.99"
 
 [dev-dependencies]
 toml = "^1.2"
+tower = { version = "0.5", features = ["util"] }
 
 [features]
 default = ["config-template", "storage-s3", "storage-gcs", "storage-azblob"]

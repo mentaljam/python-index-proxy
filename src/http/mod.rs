@@ -37,7 +37,10 @@ async fn list_indices(State(state): AppState) -> Response {
 
 async fn index_info(State(state): AppState, Path(index): Path<String>) -> Response {
     match state.get_index_info(&index) {
-        Some(page) => ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], page).into_response(),
+        Some(page) => {
+            crate::logging::index(&index);
+            ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], page).into_response()
+        }
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -60,10 +63,7 @@ async fn get_detail(
             ([(header::CONTENT_TYPE, content_type)], body).into_response()
         }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(err) => {
-            tracing::error!("{err:?}");
-            error_response(&err)
-        }
+        Err(err) => error_response(&err),
     };
     response
         .headers_mut()
@@ -158,10 +158,7 @@ async fn get_file(
         Ok(File::Bytes(bytes)) => bytes.into_response(),
         Ok(File::Stream(stream)) => Body::from_stream(stream).into_response(),
         Ok(File::None) => StatusCode::NOT_FOUND.into_response(),
-        Err(err) => {
-            tracing::error!("{err:?}");
-            error_response(&err)
-        }
+        Err(err) => error_response(&err),
     }
 }
 
@@ -176,6 +173,7 @@ fn error_status(error: &anyhow::Error) -> StatusCode {
 }
 
 fn error_response(error: &anyhow::Error) -> Response {
+    crate::logging::record_error(error);
     let status = error_status(error);
     if status == StatusCode::SERVICE_UNAVAILABLE {
         (status, [(header::RETRY_AFTER, "1")]).into_response()

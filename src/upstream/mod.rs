@@ -64,9 +64,8 @@ pub(crate) async fn index_page(
         }
         anyhow::ensure!(
             response.status().is_success(),
-            "Upstream index {} returned {}",
-            response.url(),
-            response.status()
+            "Upstream index returned HTTP {}",
+            response.status().as_u16()
         );
         let content_type = response
             .headers()

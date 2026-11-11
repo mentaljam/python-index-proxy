@@ -14,7 +14,9 @@ use super::Shutdown;
 
 impl Shutdown {
     pub(crate) async fn serve(&self, listener: TcpListener, router: Router) -> anyhow::Result<()> {
-        let router = router.layer(middleware::from_fn_with_state(self.clone(), requests));
+        let router = router
+            .layer(middleware::from_fn_with_state(self.clone(), requests))
+            .layer(middleware::from_fn(crate::logging::request));
         let stop_accepting = CancellationToken::new();
         let server = axum::serve(listener, router)
             .with_graceful_shutdown(stop_accepting.clone().cancelled_owned());

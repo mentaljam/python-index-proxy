@@ -72,6 +72,7 @@ impl State {
             return Ok(None);
         };
         let package = package.as_str();
+        crate::logging::package(index_slug, package);
         let data = &self.0;
         let index_cache = &data.index_cache;
         let url_templates = data.indices.get(index_slug);
@@ -79,23 +80,27 @@ impl State {
         if let Some(detail) = index_cache.get(&cache_key).await
             && artifact_id.is_none_or(|id| detail.files.contains_key(id))
         {
+            crate::logging::cache("index", "hit");
             return Ok(Some(detail));
         }
         let Some(url_templates) = url_templates else {
             return Ok(None);
         };
+        crate::logging::cache("index", "miss");
         let lease = data.index_refreshes.lease(cache_key.clone());
         let revision = lease.entry.revision.load(Ordering::Acquire);
         let mut previous = lease.entry.result.lock().await;
         if lease.entry.revision.load(Ordering::Acquire) != revision
             && let Some(result) = previous.as_ref()
         {
+            crate::logging::cache("index", "shared");
             return share_refresh_result(result);
         }
         // Another request may have populated the cache before this lease was acquired.
         if let Some(detail) = index_cache.get(&cache_key).await
             && artifact_id.is_none_or(|id| detail.files.contains_key(id))
         {
+            crate::logging::cache("index", "hit");
             return Ok(Some(detail));
         }
         let result = match data.index_permits.clone().try_acquire_owned() {

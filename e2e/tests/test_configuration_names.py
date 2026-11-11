@@ -51,7 +51,7 @@ def test_invalid_configuration_fails_before_binding_without_leaking_credentials(
     assert result.returncode == 1, output
     expected_field = {
         "prefix": "path_prefix",
-        "template": "indices.default[0]",
+        "template": "indices",
         "public_url": "public_url",
     }[invalid]
     assert expected_field in output

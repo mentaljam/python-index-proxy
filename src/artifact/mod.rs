@@ -37,18 +37,23 @@ impl State {
         {
             return Ok(File::None);
         }
-        tracing::debug!("processing request for {file}");
+        crate::logging::package(&index, &package);
         let object_path = artifact_path(&index, &package, &hash, &file);
 
+        crate::logging::cache("artifact", "lookup");
         if let Some(file) = stored_file(&self.0.storage, &object_path).await? {
+            crate::logging::cache("artifact", "hit");
             return Ok(file);
         }
+        crate::logging::cache("artifact", "miss");
         let (reply, result) = oneshot::channel();
         let state = self.clone();
-        self.0.shutdown.spawn(async move {
-            let fetch = state.artifact_response(&index, &package, &hash, &file);
-            download_response(&state.0, object_path, fetch, reply).await;
-        });
+        self.0
+            .shutdown
+            .spawn(crate::logging::inherit_context(async move {
+                let fetch = state.artifact_response(&index, &package, &hash, &file);
+                download_response(&state.0, object_path, fetch, reply).await;
+            }));
         result.await?
     }
 
@@ -76,7 +81,10 @@ impl State {
         let response =
             crate::upstream::send(&self.0.http_client, url.clone(), self.0.upstream).await?;
         if !response.status().is_success() {
-            anyhow::bail!("Failed to get {url}")
+            anyhow::bail!(
+                "Upstream artifact returned HTTP {}",
+                response.status().as_u16()
+            )
         }
 
         Ok(Some(response))

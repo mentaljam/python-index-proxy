@@ -11,6 +11,7 @@ mod artifact;
 mod coordination;
 mod http;
 mod index;
+mod logging;
 mod models;
 mod paths;
 mod settings;
@@ -37,7 +38,7 @@ async fn main() {
     let settings = match Settings::new() {
         Ok(settings) => settings,
         Err(err) => {
-            eprintln!("{err}");
+            eprintln!("Invalid configuration: {}", logging::config_error(&err));
             std::process::exit(1);
         }
     };
@@ -65,7 +66,7 @@ async fn serve(settings: Settings) -> anyhow::Result<()> {
     let router = get_router(&path_prefix);
 
     let listener = TcpListener::bind(bind).await?;
-    tracing::info!("Listening on http://{bind}");
+    tracing::info!(bind = %bind, "Listening");
 
     shutdown.serve(listener, router.with_state(state)).await
 }
