@@ -24,33 +24,32 @@ def pytest_runtest_makereport(
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
+    root = Path(__file__).resolve().parents[2]
+    default_ = root.joinpath("target", "debug", "python-index-proxy")
     parser.addoption(
         "--proxy-binary",
         type=Path,
-        default=Path(__file__).resolve().parents[2]
-        / "target"
-        / "debug"
-        / "python-index-proxy",
-        help="Path to a prebuilt proxy executable (default: target/debug/python-index-proxy)",
+        default=default_,
+        help=f"Path to a prebuilt proxy executable (default: {default_.relative_to(root)})",
     )
 
 
 @pytest.fixture(name="proxy_binary", scope="session")
 def proxy_binary_fixture(request: pytest.FixtureRequest) -> Path:
     binary = cast("Path", request.config.getoption("--proxy-binary")).resolve()
-    if not binary.is_file():
-        pytest.fail(
-            f"Proxy binary does not exist: {binary}. Run `mise run build-e2e` first."
-        )
-    return binary
+    if binary.is_file():
+        return binary
+    pytest.fail(
+        f"Proxy binary does not exist: {binary}. Run `mise run build-e2e` first."
+    )
 
 
 @pytest.fixture(name="uv_binary", scope="session")
 def uv_binary_fixture() -> str:
     binary = shutil.which("uv")
-    if binary is None:
-        pytest.fail("uv must already be installed; the tests never download tools")
-    return binary
+    if binary is not None:
+        return binary
+    pytest.fail("uv must already be installed; the tests never download tools")
 
 
 @pytest.fixture(name="client", params=["pip", "uv"])
