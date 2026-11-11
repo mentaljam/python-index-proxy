@@ -1,13 +1,14 @@
 #!/usr/bin/env -S uv run --no-python-downloads --script
-# MISE description="Check shared project versions and the release tag when present"
+# MISE description="Check application and chart versions and the release tag when present"
 
 # /// script
 # requires-python = ">=3.15"
 # dependencies = ["pyyaml==6.0.3"]
 # ///
 
-"""Validate shared release versions and the optional Git tag."""
+"""Validate independent release versions and the optional Git tag."""
 
+import argparse
 import os
 import re
 import tomllib
@@ -15,26 +16,27 @@ from pathlib import Path
 
 import yaml
 
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "--chart-image",
+    action="store_true",
+    help="Print the default chart image after validation",
+)
+args = parser.parse_args()
+
 with Path("Cargo.toml").open("rb") as cargo_toml:
     package = tomllib.load(cargo_toml)["package"]
 
 with Path("charts/python-index-proxy/Chart.yaml").open("rb") as chart_yaml:
     chart = yaml.safe_load(chart_yaml)
 
+with Path("Cargo.lock").open("rb") as cargo_lock:
+    locked_packages = tomllib.load(cargo_lock)["package"]
+
 package_name = package["name"]
 package_version = package["version"]
 chart_version = chart["version"]
 chart_app_version = chart["appVersion"]
-
-if chart_version != package_version or chart_app_version != package_version:
-    raise SystemExit(
-        f"Version mismatch: Cargo.toml={package_version!r}, "
-        f"Chart.yaml.version={chart_version!r}, "
-        f"Chart.yaml.appVersion={chart_app_version!r}"
-    )
-
-with Path("Cargo.lock").open("rb") as cargo_lock:
-    locked_packages = tomllib.load(cargo_lock)["package"]
 
 if not any(
     item["name"] == package_name and item["version"] == package_version
@@ -44,28 +46,48 @@ if not any(
         f"Cargo.lock is not updated for {package['name']} {package_version}"
     )
 
-# Docker tags cannot contain SemVer build metadata ('+').
-parsed = re.fullmatch(
-    r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
-    r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?",
-    package_version,
-)
-if parsed is None:
-    raise SystemExit(f"Unsupported release version: {package_version!r}")
-if parsed[4] and any(
-    part.isdigit() and len(part) > 1 and part.startswith("0")
-    for part in parsed[4].split(".")
+# Keep release identifiers compatible with Docker tags (no '+' metadata).
+for label, version in (
+    ("Cargo.toml", package_version),
+    ("Chart.yaml.version", chart_version),
+    ("Chart.yaml.appVersion", chart_app_version),
 ):
-    raise SystemExit(
-        f"Numeric prerelease identifiers must not have leading zeroes: {package_version!r}"
+    if not isinstance(version, str):
+        raise SystemExit(f"{label} must be a version string")
+    parsed = re.fullmatch(
+        r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+        r"(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?",
+        version,
     )
+    if parsed is None:
+        raise SystemExit(f"Unsupported release version in {label}: {version!r}")
+    if parsed[4] and any(
+        part.isdigit() and len(part) > 1 and part.startswith("0")
+        for part in parsed[4].split(".")
+    ):
+        raise SystemExit(
+            f"Numeric prerelease identifiers must not have leading zeroes: {version!r}"
+        )
 
 ref = os.environ.get("GITHUB_REF", "")
 if ref.startswith("refs/tags/"):
     tag = ref.removeprefix("refs/tags/")
-    if tag != f"v{package_version}":
-        raise SystemExit(
-            f"Release tag {tag!r} does not match project version {package_version!r}"
-        )
+    expected = (
+        f"chart-v{chart_version}"
+        if tag.startswith("chart-v")
+        else f"v{package_version}"
+    )
+    if tag != expected:
+        raise SystemExit(f"Release tag {tag!r} does not match expected {expected!r}")
 
-print(f"Project version: {package_version}")
+if args.chart_image:
+    with Path("charts/python-index-proxy/values.yaml").open("rb") as values_yaml:
+        image = yaml.safe_load(values_yaml)["image"]
+    if image["digest"]:
+        print(f"{image['repository']}@{image['digest']}")
+    else:
+        print(f"{image['repository']}:{image['tag'] or chart_app_version}")
+else:
+    print(
+        f"Application: {package_version}; chart: {chart_version}; appVersion: {chart_app_version}"
+    )

@@ -9,10 +9,11 @@ exposes `workflow_call` so release checks use the same commands against the
 tagged commit, with the test container build skipped.
 
 `.github/workflows/release.yml` runs for version tags matching `v[0-9]*`. It first
-calls CI, then publishes the crate and builds the image in parallel. Once the
-image is published, it packages and publishes the chart.
-The chart job waits for the image publication to succeed. The workflows use
-separate concurrency groups so a release does not conflict with its nested CI.
+calls CI, then publishes the crate and builds the image in parallel. The chart is released separately by
+`.github/workflows/release-chart.yml` on `chart-v[0-9]*` tags. That workflow checks
+versions, lints the chart, verifies its default image exists in GHCR, and packages
+and publishes the chart. It does not build or publish the application.
+The workflows use separate concurrency groups.
 
 Tool downloads are cached by mise-action. rust-cache separately caches Cargo
 registry data and build outputs; it does not cache the rustup toolchain. uv's
@@ -24,30 +25,32 @@ were checked against upstream release pages when this workflow was added.
 
 ## Image and chart releases
 
-Push a version tag to publish an image to
-`ghcr.io/mentaljam/python-index-proxy` and a chart to
-`oci://ghcr.io/mentaljam/charts/python-index-proxy`. Both use the repository's
-GITHUB_TOKEN with `packages: write`, scoped to the publishing jobs. Package
-visibility and repository access are configured in GitHub Packages.
+Push an application tag `v<version>` to publish the crate and image to
+`ghcr.io/mentaljam/python-index-proxy`. Push `chart-v<version>` to publish a chart
+to `oci://ghcr.io/mentaljam/charts/python-index-proxy`. GHCR publication uses the
+repository's GITHUB_TOKEN with `packages: write`, scoped to publishing jobs.
+Package visibility and repository access are configured in GitHub Packages.
 
-Application and chart use one shared release version:
+Application and chart have independent release versions:
 
-- `Cargo.toml` package version;
-- `Chart.yaml` `version`;
-- `Chart.yaml` `appVersion`.
+- `Cargo.toml` and Cargo.lock define the application version for crates.io and Docker.
+- `Chart.yaml.version` defines the chart version.
+- `Chart.yaml.appVersion` selects the default, already published application image.
+  It need not match the current Cargo.toml.
 
-`mise run release-check`, included at the start of `mise run ci`, requires all
-three to match and checks that Cargo.lock contains the current package version.
-The check runs through uv with PyYAML declared in the script's inline dependencies.
-On release tags it also requires the tag to be `v` followed by that version.
-Versions must be SemVer without `+` build metadata, which Docker tags do not
-support. Prerelease versions are supported.
+`mise run release-check`, included at the start of `mise run ci`, validates all
+three version strings and the application's Cargo.lock entry. On release tags,
+it checks `v<version>` against Cargo.toml or `chart-v<version>` against the chart
+version. Versions must be SemVer without `+` build metadata; prereleases are
+supported. The check uses uv with PyYAML declared in its inline dependencies.
 
-Before a release, update the versions in Cargo.toml and Chart.yaml together and
-refresh Cargo.lock. Bump the shared version even for a chart-only change: every
-release publishes the crate, image and chart. Version bumps belong to release
-preparation, not every intermediate PR. Compatibility covers application behavior
-and the chart's public configuration.
+A chart-only change requires only a chart version bump. Publishing an application
+does not automatically update or release the chart. To adopt a new application
+version, update appVersion and bump the chart version, including any required
+template or configuration changes. A compatible image update normally warrants
+a chart patch; features and breaking chart configuration changes determine the
+chart's own version independently. Version bumps belong to release preparation,
+not every intermediate PR.
 
 Chart packaging uses the committed metadata without version overrides. Published
 tags use the exact version without the Git tag's leading `v`. Stable releases also update the container image
@@ -97,15 +100,25 @@ The action revokes the token when the job finishes.
 
 ## Release procedure
 
-1. Update the shared version and lockfile, including for chart-only releases.
-   The version must not already be published on crates.io.
-2. Run `mise run ci`, commit the release changes, and run `cargo package --locked`
-   from the clean checkout to verify the distributable package.
-3. Push the release commit and its matching `v<version>` tag. The tag triggers
-   publication of the crate, image and chart from that commit.
-4. Check all publishing jobs: publication across the registries is not atomic.
+For an application release:
 
-On partial failure, rerun only failed jobs. A successfully published crate version
-cannot be published again or overwritten. Do not move a published release tag;
-source fixes require a new shared version. Prerelease tags publish their matching
-crate/image/chart versions without updating the container's `latest` tag.
+1. Update Cargo.toml and refresh Cargo.lock. The version must not already be
+   published on crates.io.
+2. Run `mise run ci`, commit, and run `cargo package --locked` from the clean
+   checkout to verify the distributable package.
+3. Push the commit and matching `v<version>` tag to publish the crate and image.
+4. Check both publishing jobs: publication across registries is not atomic.
+
+For a chart release:
+
+1. Update Chart.yaml.version. When adopting a new application, also update
+   appVersion after its image has been published.
+2. Run `mise run release-check` and `mise run chart-check`, then commit.
+3. Push the commit and matching `chart-v<version>` tag. The workflow verifies the
+   default image exists before publishing the chart.
+
+On partial failure, rerun only failed jobs. Do not move published release tags
+or overwrite released artifacts. Source fixes require a new version of the
+affected artifact; a successfully published crate version cannot be published
+again. Application prereleases do not update the container's `latest` tag.
+Chart prereleases are independent and use their exact chart version.

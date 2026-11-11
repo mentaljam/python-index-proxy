@@ -39,7 +39,8 @@ helm install proxy oci://ghcr.io/mentaljam/charts/python-index-proxy \
   --version "$VERSION" --namespace packages --create-namespace -f my-values.yaml
 ```
 
-The chart's `version` and `appVersion` follow the shared application release.
+The chart's `version` is released independently of the application. Its
+`appVersion` selects an already published application image by default.
 Helm validates supplied values using the schema embedded in the chart package.
 For publication details, see the repository's
 [release guide](https://github.com/mentaljam/python-index-proxy/blob/main/docs/releases.md).

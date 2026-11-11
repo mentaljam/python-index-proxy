@@ -125,8 +125,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-    outputs:
-      version: ${{ steps.metadata.outputs.version }}
     steps:
       - name: Download digests
         uses: actions/download-artifact@v4
@@ -174,38 +172,3 @@ jobs:
           IMAGE: ghcr.io/${{ github.repository }}
           VERSION: ${{ steps.metadata.outputs.version }}
         run: docker buildx imagetools inspect "$IMAGE:$VERSION"
-
-  chart:
-    name: Publish Helm chart
-    needs: image
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      packages: write
-    env:
-      MISE_DISABLE_TOOLS: rust,python,uv,ruff,ty
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7.0.1
-
-      - name: Set up Helm with mise
-        uses: jdx/mise-action@v5.2.7
-        with:
-          version: "2026.11.6"
-          install_args: helm
-          cache: false
-
-      - name: Package chart
-        run: mise run chart-package
-
-      - name: Log in to GHCR for Helm
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: mise run chart-login
-
-      - name: Push chart
-        env:
-          RELEASE_VERSION: ${{ needs.image.outputs.version }}
-          CHART_REGISTRY: oci://ghcr.io/${{ github.repository_owner }}/charts
-        run: mise run chart-push "$RELEASE_VERSION" "$CHART_REGISTRY"
