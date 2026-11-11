@@ -1,0 +1,43 @@
+{{- $name := include "python-index-proxy.fullname" . -}}
+{{- $base := printf "http://127.0.0.1:3000%s" (include "python-index-proxy.prefix" .) -}}
+{{- if .Values.config.public_url -}}
+{{- $base = printf "%s/" (trimSuffix "/" .Values.config.public_url) -}}
+{{- end -}}
+{{- $indices := keys .Values.config.indices | sortAlpha -}}
+{{- $index := first $indices -}}
+{{- if has "default" $indices -}}
+{{- $index = "default" -}}
+{{- end -}}
+python-index-proxy
+
+       _
+ _ __ (_)_ __  _ __
+| '_ \| | '_ \| '__|
+| |_) | | |_) | |
+| .__/|_| .__/|_|
+|_|     |_|
+
+Release:   {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+Version:   {{ .Chart.AppVersion }}
+
+Check the rollout:
+  kubectl -n {{ .Release.Namespace }} rollout status deployment/{{ $name }}
+{{ if not .Values.config.public_url }}
+Connect locally (keep this command running):
+  kubectl -n {{ .Release.Namespace }} port-forward service/{{ $name }} 3000:{{ .Values.service.port }}
+
+For client-facing artifact links, set config.public_url to the URL clients use
+(http://127.0.0.1:3000{{ include "python-index-proxy.prefix" . }} for this port-forward).
+{{ end }}
+Your package indexes:
+{{- range $indices }}
+  {{ . }}: {{ $base }}{{ . }}/
+{{- end }}
+{{ if $index }}
+Install a package (replace PACKAGE_NAME):
+  pip install --index-url {{ printf "%s%s/" $base $index | squote }} PACKAGE_NAME
+  uv pip install --index-url {{ printf "%s%s/" $base $index | squote }} PACKAGE_NAME
+{{ end }}
+View these notes again:
+  helm get notes {{ .Release.Name }} -n {{ .Release.Namespace }}
