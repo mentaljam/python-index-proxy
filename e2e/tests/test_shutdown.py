@@ -4,6 +4,7 @@ import socket
 import time
 from concurrent.futures import ThreadPoolExecutor
 from http.client import IncompleteRead
+from typing import cast
 
 import pytest
 
@@ -84,7 +85,7 @@ def test_sigterm_cancels_stalled_fill_and_cleans_up_before_exit(
 
     def read_until_shutdown() -> bytes:
         with proxy.opener.open(artifact, timeout=40) as response:
-            return response.read()
+            return cast("bytes", response.read())
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         download = pool.submit(read_until_shutdown)

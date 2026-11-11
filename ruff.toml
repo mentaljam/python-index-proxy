@@ -1,0 +1,17 @@
+target-version = "py315"
+line-length = 88
+
+[lint]
+select = ["ALL"]
+ignore = [
+    "D203",   # Use no blank line before class docstrings.
+    "D213",   # Start docstring summaries on the first line.
+    "CPY001", # No mandatory copyright headers.
+    "INP001", # Python scripts and tests are not packages.
+    "COM812", # Trailing commas are managed by the formatter.
+    "ISC001", # Avoid conflicts with the formatter.
+    "E501",   # The formatter manages wrapping.
+]
+
+[lint.per-file-ignores]
+"mise-tasks/*" = ["T201", "TRY003", "EM102"] # CLI output and exit messages.

@@ -40,7 +40,7 @@ def proxy_binary_fixture(request: pytest.FixtureRequest) -> Path:
     binary = cast("Path", request.config.getoption("--proxy-binary")).resolve()
     if not binary.is_file():
         pytest.fail(
-            f"Proxy binary does not exist: {binary}. Run `just build-e2e` first."
+            f"Proxy binary does not exist: {binary}. Run `mise run build-e2e` first."
         )
     return binary
 

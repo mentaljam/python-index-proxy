@@ -35,6 +35,20 @@ helm install proxy charts/python-index-proxy --namespace packages --create-names
 The examples are templates for your own values: substitute endpoints, bucket names,
 public URLs, Secret names and image tags before installing.
 
+After the corresponding release has been published, install directly from GHCR:
+
+```sh
+helm install proxy oci://ghcr.io/mentaljam/charts/python-index-proxy \
+  --version 0.1.0 --namespace packages --create-namespace -f my-values.yaml
+```
+
+The chart's `version` and `appVersion` match the Cargo package version. CI checks
+this agreement and the release workflow packages Chart.yaml unchanged. The OCI
+artifact contains the entire chart archive, including `values.schema.json`.
+Helm uses that embedded schema to validate your values during install, upgrade,
+lint and template operations. No separate schema download is needed. The schema
+URL comment in values.yaml serves editor validation for copied values files.
+
 ## Configuration and credentials
 
 `config` is a YAML structure matching the application's TOML configuration, except
@@ -200,7 +214,7 @@ check cross-field constraints such as filesystem replicas and mount paths.
 Backend-specific semantics and URL/path validation remain the application's
 responsibility.
 
-Run `just chart-check` for local linting of the supplied storage and routing
+Run `mise run chart-check` for local linting of the supplied storage and routing
 examples, or use `helm lint` / `helm template` with your own values. No cluster
 access is needed. These checks do not establish image availability, storage
 connectivity, or runtime behavior in your Kubernetes cluster.

@@ -2,13 +2,11 @@
 name = "python-index-proxy-e2e"
 version = "0.1.0"
 description = "End-to-end compatibility tests using real pip and uv clients"
-requires-python = ">=3.12"
+requires-python = ">=3.15"
 
 dependencies = [
     "pytest>=9,<10",
     "pytest-xdist>=3.8,<4",
-    "ruff>=0.17.4",
-    "ty>=0.0.100",
 ]
 
 [tool.uv]
@@ -19,26 +17,13 @@ testpaths = ["tests"]
 addopts = "-ra -n auto"
 
 [tool.ruff]
-target-version = "py312"
-line-length = 88
+extend = "../ruff.toml"
 src = ["tests"]
 
 [tool.ruff.lint]
-select = ["ALL"]
 ignore = [
-    "D",       # Test names and assertions describe behavior; docstrings are optional.
-    "CPY001",  # No mandatory copyright headers for test files.
-    "INP001",  # This is a non-package pytest project.
+    "D",       # Test names and assertions describe behavior.
     "S101",    # Assertions are the test oracle.
-    "PLR2004", # Literal versions, sizes, counts and HTTP statuses clarify fixtures.
-    "TC",      # Keep fixture type annotations readable with ordinary imports.
-    "COM812",  # Trailing commas are managed by the formatter.
-    "ISC001",  # Avoid conflicts with the formatter's string layout.
-    "E501",    # The formatter manages wrapping; diagnostic strings may be longer.
+    "PLR2004", # Literal values clarify fixtures.
+    "TC",      # Keep fixture type annotations readable.
 ]
-
-[tool.ty.src]
-include = ["tests"]
-
-[tool.ty.rules]
-all = "error"

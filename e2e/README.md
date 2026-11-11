@@ -84,25 +84,25 @@ file list. The index root remains informational and does not enumerate projects.
 
 ## Run
 
-Prerequisites: Rust/Cargo, uv, and an installed Python >= 3.12 with `venv` and
+Prerequisites: Rust/Cargo, uv, and an installed Python >= 3.15 with `venv` and
 `ensurepip`. The Python used by pytest also supplies the interpreter and bundled
 pip for client environments. uv is taken from `PATH`. Client versions therefore
-depend on the test environment; `uv.lock` pins pytest, pytest-xdist, Ruff and ty dependencies.
+depend on the test environment; `uv.lock` pins pytest and pytest-xdist dependencies. Mise pins Ruff and ty.
 
-From the repository root (requires just):
+From the repository root (requires mise):
 
 ```sh
-just e2e
-just e2e -n 2 -q
-just e2e -k 'cold_install or restart'
+mise run e2e
+mise run e2e -n 2 -q
+mise run e2e -k 'cold_install or restart'
 ```
 
-The `e2e` recipe depends on `build-e2e`, which runs
+The `e2e` task depends on `build-e2e`, which runs
 `cargo build --locked --no-default-features` before starting pytest. Tests never
 build the proxy. Normal Cargo and uv dependency setup may require network access.
 Once dependencies are cached, the suite only needs loopback TCP sockets.
 
-To run pytest directly, build the executable first with `just build-e2e` (or the
+To run pytest directly, build the executable first with `mise run build-e2e` (or the
 Cargo command above), then run from this directory:
 
 ```sh
@@ -134,19 +134,20 @@ than assuming `-n auto` is fastest. Parallelism does not suppress expected failu
 
 ## Static checks
 
-Run `just check` from the repository root for Rust and Python checks, or run
+Run `mise run check` from the repository root for Rust and Python checks, or run
 Python checks from this directory:
 
 ```sh
-uv run --locked --no-python-downloads ruff check .
-uv run --locked --no-python-downloads ruff format --check .
-uv run --locked --no-python-downloads ty check
+ruff check tests
+ruff format --check tests
+uv run --locked --no-python-downloads ty check --config-file ../ty.toml tests
 ```
 
-Configuration lives in `pyproject.toml`. Ruff enables all stable rules, with
+Ruff configuration in `pyproject.toml` extends the root `ruff.toml`; ty uses
+the shared root `ty.toml`. Ruff enables all stable rules, with
 documented exceptions for tests and formatter compatibility. Annotation checks
 remain enabled. ty checks `tests/` with all diagnostics treated as errors.
-Both tools target the project's minimum Python version, 3.12.
+Both tools target the project's minimum Python version, 3.15.
 
 ## Coverage
 

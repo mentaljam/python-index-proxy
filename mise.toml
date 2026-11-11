@@ -1,0 +1,120 @@
+[tools]
+helm = "4.3.1"
+python = "3.15.2"
+ruff = "0.17.4"
+rust = { version = "1.99.1", profile = "minimal", components = ["rustfmt", "clippy"] }
+ty = "0.0.100"
+uv = "0.13.7"
+
+[tasks.build]
+description = "Build the proxy; accepts Cargo arguments such as --release"
+run = "cargo build --locked"
+
+[tasks.run]
+description = "Run the proxy with an optional configuration path"
+usage = 'arg "[config]" help="Configuration file" default="settings.local.toml"'
+run = 'cargo run --locked -- "${usage_config?}"'
+
+[tasks.fmt]
+description = "Format Rust and Python sources"
+depends = ["fmt:rust", "fmt:python", "fmt:e2e"]
+
+[tasks."fmt:rust"]
+description = "Format Rust sources"
+dir = "{{config_root}}"
+run = "cargo fmt --all"
+
+[tasks."fmt:python"]
+description = "Format root Python scripts"
+dir = "{{config_root}}"
+run = "ruff format mise-tasks/release-check"
+
+[tasks."fmt:e2e"]
+description = "Format Python end-to-end tests"
+dir = "{{config_root}}/e2e"
+run = "ruff format tests"
+
+[tasks.check]
+description = "Check formatting, lint Rust and Python, and check Python types"
+depends = ["check:rust", "check:python", "check:e2e"]
+
+[tasks."check:rust"]
+description = "Check Rust formatting and lint default and metrics features"
+dir = "{{config_root}}"
+run = [
+  "cargo fmt --all -- --check",
+  "cargo clippy --locked --all-targets -- -D warnings",
+  "cargo clippy --locked --all-targets --features metrics -- -D warnings",
+]
+
+[tasks."check:python"]
+description = "Check root Python scripts using their inline-dependency environment"
+dir = "{{config_root}}"
+run = [
+  "ruff format --check mise-tasks/release-check",
+  "ruff check mise-tasks/release-check",
+  "uv sync --no-python-downloads --script mise-tasks/release-check",
+  'ty check --python "$(uv python find --no-python-downloads --script mise-tasks/release-check)" --python-version 3.15 mise-tasks/release-check',
+]
+
+[tasks."check:e2e"]
+description = "Check Python end-to-end tests using their project environment"
+dir = "{{config_root}}/e2e"
+run = [
+  "ruff format --check tests",
+  "ruff check tests",
+  "uv run --locked --no-python-downloads ty check --config-file ../ty.toml tests",
+]
+
+[tasks.test]
+description = "Run Rust tests; accepts Cargo test arguments"
+run = "cargo test --locked"
+
+[tasks.build-e2e]
+description = "Build the filesystem-only proxy used by end-to-end tests"
+run = "cargo build --locked --no-default-features"
+
+[tasks.e2e]
+description = "Build the proxy and run real pip/uv end-to-end tests; accepts pytest arguments"
+depends = ["build-e2e"]
+run = "uv run --project e2e --locked --no-python-downloads pytest -c e2e/pyproject.toml e2e/tests"
+
+[tasks.chart-check]
+description = "Lint the chart with explicit storage and optional routing/monitoring"
+run = [
+  "helm lint charts/python-index-proxy --strict -f charts/python-index-proxy/examples/s3.yaml",
+  "helm lint charts/python-index-proxy --strict -f charts/python-index-proxy/examples/filesystem.yaml",
+  "helm lint charts/python-index-proxy --strict -f charts/python-index-proxy/examples/s3.yaml -f charts/python-index-proxy/examples/ingress.yaml",
+  "helm lint charts/python-index-proxy --strict -f charts/python-index-proxy/examples/s3.yaml -f charts/python-index-proxy/examples/gateway.yaml --set serviceMonitor.enabled=true",
+]
+
+[tasks.ci]
+description = "Run all checks and tests in order, avoiding concurrent writes to the proxy binary"
+run = [
+  "mise run release-check",
+  "mise run check",
+  "mise run test",
+  "mise run test --features metrics",
+  "mise run e2e -n 2",
+  "mise run chart-check",
+]
+
+[tasks.cache-prune]
+description = "Prune the uv cache before saving it in CI"
+run = "uv cache prune --ci"
+
+[tasks.chart-package]
+description = "Package the chart using the versions committed in Chart.yaml"
+run = "helm package charts/python-index-proxy --destination target/helm"
+
+[tasks.chart-login]
+description = "Authenticate Helm to GHCR using GHCR_TOKEN and GITHUB_ACTOR"
+run = 'printf "%s" "${GHCR_TOKEN?}" | helm registry login ghcr.io --username "${GITHUB_ACTOR?}" --password-stdin'
+
+[tasks.chart-push]
+description = "Push a packaged chart to an OCI registry"
+usage = '''
+arg "<version>" help="Packaged chart version"
+arg "[registry]" help="OCI registry namespace" default="oci://ghcr.io/mentaljam/charts"
+'''
+run = 'helm push "target/helm/python-index-proxy-${usage_version?}.tgz" "${usage_registry?}"'
