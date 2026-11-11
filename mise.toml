@@ -95,7 +95,7 @@ run = [
   "mise run check",
   "mise run test",
   "mise run test --features metrics",
-  "mise run e2e -n 2",
+  "mise run e2e -v",
   "mise run chart-check",
 ]
 
