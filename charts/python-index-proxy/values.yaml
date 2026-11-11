@@ -1,0 +1,136 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/mentaljam/python-index-proxy/main/charts/python-index-proxy/values.schema.json
+
+replicaCount: 1
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: ghcr.io/mentaljam/python-index-proxy
+  # Defaults to Chart.appVersion. Image publication is managed separately.
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# The chart owns the listen address; do not override PIPR__BIND in env/envFrom.
+containerPort: 3000
+service:
+  port: 3000
+  annotations: {}
+
+# Mirrors application configuration, except bind (managed by containerPort).
+# Exactly one storage backend MUST be provided. No storage service or bucket is created.
+# Options for each backend use native OpenDAL field names; the image must support it.
+config:
+  log_format: json
+  path_prefix: /
+  indices:
+    default:
+      policy: first
+      sources:
+        - https://pypi.org/simple/{package}/
+  index_cache: {}
+  limits: {}
+  upstream: {}
+  storage_http: {}
+  storage: {}
+
+# Use valueFrom.secretKeyRef for secret overrides, e.g.
+# - name: PIPR__STORAGE__S3__SECRET_ACCESS_KEY
+#   valueFrom:
+#     secretKeyRef:
+#       name: proxy-storage
+#       key: secret-access-key
+env: []
+envFrom: []
+
+# The data volume is mounted only for storage.fs. Without persistence it is emptyDir.
+# fs.root and fs.atomic_write_dir must be inside mountPath.
+persistence:
+  enabled: false
+  existingClaim: ""
+  mountPath: /data
+  size: 10Gi
+  # null uses the cluster default; "" requests no StorageClass.
+  storageClass: null
+  # With existingClaim, declare its actual access modes here too.
+  accessModes:
+    - ReadWriteOnce
+  annotations: {}
+
+# auto selects Recreate for persistent fs, RollingUpdate otherwise.
+updateStrategy: auto
+terminationGracePeriodSeconds: 35
+resources: {}
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  runAsGroup: 65534
+  fsGroup: 65534
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  automountServiceAccountToken: false
+
+# TCP checks do not depend on upstream indices or storage availability.
+probes:
+  startup:
+    enabled: true
+    periodSeconds: 2
+    timeoutSeconds: 1
+    failureThreshold: 30
+  readiness:
+    enabled: true
+    periodSeconds: 10
+    timeoutSeconds: 1
+    failureThreshold: 3
+  liveness:
+    enabled: true
+    periodSeconds: 10
+    timeoutSeconds: 1
+    failureThreshold: 3
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  # - host: packages.example.com
+  #   paths:
+  #     - path: /
+  #       pathType: Prefix
+  hosts: []
+  tls: []
+
+# References an existing Gateway. The chart creates neither Gateways nor CRDs.
+httpRoute:
+  enabled: false
+  annotations: {}
+  parentRefs: []
+  hostnames: []
+  # Empty uses config.path_prefix. Configure public_url for any external rewrite.
+  path: ""
+
+# Requires the ServiceMonitor CRD and a configured Prometheus Operator or Alloy collector.
+serviceMonitor:
+  enabled: false
+  labels: {}
+  annotations: {}
+  interval: 30s
+  scrapeTimeout: 10s

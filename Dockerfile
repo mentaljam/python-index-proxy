@@ -8,7 +8,7 @@ COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
-ARG CARGO_FEATURES="default"
+ARG CARGO_FEATURES="default,metrics"
 COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --target x86_64-unknown-linux-musl --recipe-path recipe.json --features "$CARGO_FEATURES"
 COPY . .

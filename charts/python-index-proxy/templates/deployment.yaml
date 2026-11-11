@@ -1,0 +1,106 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "python-index-proxy.fullname" . }}
+  labels:
+    {{- include "python-index-proxy.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  strategy:
+    {{- if eq .Values.updateStrategy "auto" }}
+    type: {{ ternary "Recreate" "RollingUpdate" (and .Values.persistence.enabled (hasKey .Values.config.storage "fs")) }}
+    {{- else }}
+    type: {{ .Values.updateStrategy }}
+    {{- end }}
+  selector:
+    matchLabels:
+      {{- include "python-index-proxy.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- $annotations := deepCopy .Values.podAnnotations -}}
+        {{- $_ := set $annotations "checksum/config" (include "python-index-proxy.config" . | sha256sum) }}
+        {{- toYaml $annotations | nindent 8 }}
+      labels:
+        {{- include "python-index-proxy.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "python-index-proxy.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: proxy
+          image: {{ include "python-index-proxy.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - /etc/python-index-proxy/python_index_proxy.toml
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.containerPort }}
+              protocol: TCP
+          env:
+            - name: PIPR__BIND
+              value: {{ printf "0.0.0.0:%v" .Values.containerPort | quote }}
+            {{- with .Values.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.envFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- range $kind := list "startup" "readiness" "liveness" }}
+          {{- $probe := index $.Values.probes $kind }}
+          {{- if $probe.enabled }}
+          {{ $kind }}Probe:
+            tcpSocket:
+              port: http
+            periodSeconds: {{ $probe.periodSeconds }}
+            timeoutSeconds: {{ $probe.timeoutSeconds }}
+            failureThreshold: {{ $probe.failureThreshold }}
+          {{- end }}
+          {{- end }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/python-index-proxy
+              readOnly: true
+            {{- if hasKey .Values.config.storage "fs" }}
+            - name: data
+              mountPath: {{ .Values.persistence.mountPath | quote }}
+            {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "python-index-proxy.fullname" . }}
+        {{- if hasKey .Values.config.storage "fs" }}
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ default (include "python-index-proxy.fullname" .) .Values.persistence.existingClaim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

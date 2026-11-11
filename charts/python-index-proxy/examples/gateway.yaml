@@ -1,0 +1,9 @@
+# Combine with a storage example. TLS is configured on the existing Gateway.
+httpRoute:
+  enabled: true
+  parentRefs:
+    - name: public
+      namespace: gateways
+      sectionName: https
+  hostnames:
+    - packages.example.com

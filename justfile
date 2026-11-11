@@ -34,3 +34,10 @@ build-e2e:
 # Build the proxy and run pip/uv end-to-end tests; accepts pytest arguments.
 e2e *args: build-e2e
     uv run --project e2e --locked --no-python-downloads pytest -c e2e/pyproject.toml e2e/tests "$@"
+
+# Lint the chart with explicit storage and each optional routing/monitoring integration.
+chart-check:
+    helm lint charts/python-index-proxy --strict -f charts/python-index-proxy/examples/s3.yaml
+    helm lint charts/python-index-proxy --strict -f charts/python-index-proxy/examples/filesystem.yaml
+    helm lint charts/python-index-proxy --strict -f charts/python-index-proxy/examples/s3.yaml -f charts/python-index-proxy/examples/ingress.yaml
+    helm lint charts/python-index-proxy --strict -f charts/python-index-proxy/examples/s3.yaml -f charts/python-index-proxy/examples/gateway.yaml --set serviceMonitor.enabled=true

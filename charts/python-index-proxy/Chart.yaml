@@ -1,0 +1,14 @@
+apiVersion: v2
+name: python-index-proxy
+description: Python package index proxy with configurable artifact storage
+home: https://github.com/mentaljam/python-index-proxy
+sources:
+  - https://github.com/mentaljam/python-index-proxy
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.25.0-0"
+keywords:
+  - python
+  - pypi
+  - proxy

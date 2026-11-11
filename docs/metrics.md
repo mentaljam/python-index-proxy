@@ -1,6 +1,6 @@
 # Prometheus metrics
 
-Metrics are optional and disabled in the default build:
+Metrics are optional and disabled in the default Cargo build:
 
 ```sh
 cargo build --locked --features metrics
@@ -8,7 +8,8 @@ cargo build --locked --features metrics
 cargo build --locked --no-default-features --features metrics
 ```
 
-For the container build, use `--build-arg CARGO_FEATURES=default,metrics`.
+The Dockerfile enables metrics by default (`CARGO_FEATURES=default,metrics`).
+To build a container without metrics, use `--build-arg CARGO_FEATURES=default`.
 No runtime configuration or additional port is required. With the feature enabled,
 `GET {path_prefix}metrics` on the application's listen address returns Prometheus
 text format (`text/plain; version=0.0.4`). With `path_prefix = "/"`, the endpoint

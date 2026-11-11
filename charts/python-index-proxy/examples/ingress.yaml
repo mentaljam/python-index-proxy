@@ -1,0 +1,13 @@
+# Combine with a storage example.
+ingress:
+  enabled: true
+  className: nginx
+  hosts:
+    - host: packages.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: packages-tls
+      hosts:
+        - packages.example.com

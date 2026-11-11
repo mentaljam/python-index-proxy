@@ -1,0 +1,7 @@
+config:
+  storage:
+    fs:
+      root: /data/artifacts
+persistence:
+  enabled: true
+  size: 20Gi

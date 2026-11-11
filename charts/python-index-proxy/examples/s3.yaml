@@ -1,0 +1,19 @@
+replicaCount: 2
+config:
+  public_url: https://packages.example.com/
+  storage:
+    s3:
+      endpoint: https://s3.example.com
+      region: us-east-1
+      bucket: python-packages
+env:
+  - name: PIPR__STORAGE__S3__ACCESS_KEY_ID
+    valueFrom:
+      secretKeyRef:
+        name: proxy-storage
+        key: access-key-id
+  - name: PIPR__STORAGE__S3__SECRET_ACCESS_KEY
+    valueFrom:
+      secretKeyRef:
+        name: proxy-storage
+        key: secret-access-key
