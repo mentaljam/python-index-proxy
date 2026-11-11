@@ -244,7 +244,11 @@ class Upstream:
         self.reply(
             metadata_path, Reply(200, wheel.metadata, "application/octet-stream")
         )
-        link = href or f"{artifact_path}#sha256={digest or wheel.sha256}"
+        link = (
+            href
+            if href is not None
+            else f"{artifact_path}#sha256={digest if digest is not None else wheel.sha256}"
+        )
         metadata_hash = hashlib.sha256(wheel.metadata).hexdigest()
         attributes = (
             f' data-core-metadata="sha256={metadata_hash}"'

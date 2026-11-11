@@ -52,7 +52,6 @@ def test_saved_uncached_url_recovers_source_after_process_restart(
     assert unquote(urlsplit(saved).path).endswith("/" + wheel.filename)
     before = upstream.journal()
     assert before == [f"/simple/{wheel.name}/"]
-    assert not upstream.artifact_requests()
     proxy.restart()
 
     # No new index request is made by the test/client before using the old URL.
