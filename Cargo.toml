@@ -12,34 +12,56 @@ strip = true
 [dependencies]
 anyhow = "^1.0"
 async-stream = "^0.3"
-axum = { version = "^0.8", features = ["macros"] }
+axum = { version = "^0.8", default-features = false, features = [
+    "tokio",
+    "http1",
+] }
 byte-unit-serde = "^0.1"
 bytes = "^1.12"
 config = { version = "^0.15", default-features = false, features = ["toml"] }
-futures = "^0.3"
+futures = { version = "^0.3", default-features = false, features = [
+    "std",
+    "async-await",
+] }
 hex = "^0.4"
 html5gum = { version = "0.9.1", default-features = false }
-http = "*"
+http = "1"
 humantime-serde = "^1.1"
 moka = { version = "^0.12", features = ["future"] }
-opendal = { version = "=0.59.5", default-features = false, features = ["executors-tokio", "http-transport-reqwest"] }
+opendal = { version = "=0.59.5", default-features = false, features = [
+    "executors-tokio",
+    "http-transport-reqwest",
+    "services-fs",
+] }
 percent-encoding = "^2.3"
 reqwest = { version = "^0.13", features = [
-    "charset",
     "deflate",
     "gzip",
     "http2",
     "rustls",
     "zstd",
 ], default-features = false }
-rustls = { version = "^0.23", default-features = false, features = ["aws-lc-rs"] }
+rustls = { version = "^0.23", default-features = false, features = [
+    "aws-lc-rs",
+] }
 serde = { version = "^1.0", features = ["derive"] }
 serde_json = "^1.0"
 sha2 = "^0.11"
-tokio = { version = "^1.54", features = ["full"] }
+tokio = { version = "^1.54", features = [
+    "io-util",
+    "macros",
+    "net",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+] }
 tokio-util = { version = "^0.7", features = ["rt"] }
 toml-example = { version = "0.17.2", optional = true }
-tower-http = { version = "^0.7", features = ["compression-gzip", "compression-zstd"] }
+tower-http = { version = "^0.7", features = [
+    "compression-gzip",
+    "compression-zstd",
+] }
 tracing = "^0.1"
 tracing-subscriber = { version = "^0.3", features = ["env-filter"] }
 url = "^2.5"
@@ -49,7 +71,12 @@ uv-normalize = "0.0.99"
 toml = "^1.2"
 
 [features]
-default = ["config-template", "storage-fs", "storage-s3", "storage-gcs", "storage-azblob"]
+default = [
+    "config-template",
+    "storage-s3",
+    "storage-gcs",
+    "storage-azblob",
+]
 storage-aliyun-drive = ["opendal/services-aliyun-drive"]
 storage-alluxio = ["opendal/services-alluxio"]
 storage-azblob = ["opendal/services-azblob"]
@@ -67,7 +94,6 @@ storage-dropbox = ["opendal/services-dropbox"]
 storage-etcd = ["opendal/services-etcd"]
 storage-foundationdb = ["opendal/services-foundationdb"]
 storage-foyer = ["opendal/services-foyer"]
-storage-fs = ["opendal/services-fs"]
 storage-ftp = ["opendal/services-ftp"]
 storage-gcs = ["opendal/services-gcs"]
 storage-gdrive = ["opendal/services-gdrive"]

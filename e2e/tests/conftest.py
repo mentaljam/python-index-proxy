@@ -72,8 +72,6 @@ def resolve_proxy_binary(config: pytest.Config) -> Path:
                 "build",
                 "--locked",
                 "--no-default-features",
-                "--features",
-                "storage-fs",
                 "--message-format=json",
             ],
             cwd=root,
