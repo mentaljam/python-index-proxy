@@ -45,10 +45,12 @@ pub struct Settings {
 
     /// Case-sensitive ASCII index names (letters/digits, internal '.', '_' and '-') map to HTTP(S) sources.
     /// Templates need exactly one {package} in the path; query strings and URL credentials are preserved.
-    /// Sources merge without priority: 4xx except 408/429 are skipped; other upstream failures return 502 without caching partial results.
+    /// Each index accepts a source array (policy "first") or { sources = [...], policy = "first" | "merge" }.
+    /// "first" stops at the first successful project page, including one with no files.
+    /// "merge" combines all sources. 4xx except 408/429 are skipped; other failures return 502 without caching partial results.
     #[serde(default = "defaults::indices", deserialize_with = "de::indices")]
-    #[cfg_attr(feature = "config-template", toml_example(default = { default = ["https://pypi.org/simple/{package}/"] }))]
-    pub indices: HashMap<String, Vec<String>>,
+    #[cfg_attr(feature = "config-template", toml_example(default = { default = { sources = ["https://pypi.org/simple/{package}/"], policy = "first" } }))]
+    pub indices: HashMap<String, Index>,
 
     /// In-memory cache of project pages and source mappings, separate for each replica.
     /// Entries are lost on restart; this cache does not store artifact bytes.
@@ -116,6 +118,51 @@ impl Settings {
             storage: crate::storage::Storage::filesystem_template(),
         }
     }
+}
+
+/// Configuration for one ordered set of upstream sources.
+#[derive(Deserialize, Serialize)]
+#[serde(from = "IndexInput")]
+pub struct Index {
+    pub sources: Vec<String>,
+    pub policy: IndexPolicy,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+enum IndexInput {
+    Sources(Vec<String>),
+    Config {
+        sources: Vec<String>,
+        #[serde(default)]
+        policy: IndexPolicy,
+    },
+}
+
+impl From<IndexInput> for Index {
+    fn from(input: IndexInput) -> Self {
+        match input {
+            IndexInput::Sources(sources) => Self::from(sources),
+            IndexInput::Config { sources, policy } => Self { sources, policy },
+        }
+    }
+}
+
+impl From<Vec<String>> for Index {
+    fn from(sources: Vec<String>) -> Self {
+        Self {
+            sources,
+            policy: IndexPolicy::default(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum IndexPolicy {
+    #[default]
+    First,
+    Merge,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
@@ -326,15 +373,15 @@ mod de {
 
     pub fn indices<'de, D: Deserializer<'de>>(
         deserializer: D,
-    ) -> Result<HashMap<String, Vec<String>>, D::Error> {
-        let mut indices = HashMap::<String, Vec<String>>::deserialize(deserializer)?;
-        for (index, templates) in &mut indices {
+    ) -> Result<HashMap<String, super::Index>, D::Error> {
+        let mut indices = HashMap::<String, super::Index>::deserialize(deserializer)?;
+        for (index, config) in &mut indices {
             if !crate::paths::valid_index_name(index) {
                 return Err(D::Error::custom(
                     "indices contains an invalid name: expected ASCII alphanumeric endpoints and only letters, digits, '.', '_' or '-'",
                 ));
             }
-            for (position, template) in templates.iter_mut().enumerate() {
+            for (position, template) in config.sources.iter_mut().enumerate() {
                 // Do not include raw URLs: they can contain credentials/query secrets.
                 *template = crate::index::IndexUrlTemplate::parse(template)
                     .map_err(|error| {
@@ -486,10 +533,10 @@ mod defaults {
         "/".into()
     }
 
-    pub fn indices() -> HashMap<String, Vec<String>> {
+    pub fn indices() -> HashMap<String, super::Index> {
         [(
             "default".into(),
-            vec!["https://pypi.org/simple/{package}/".into()],
+            vec!["https://pypi.org/simple/{package}/".into()].into(),
         )]
         .into()
     }
@@ -645,12 +692,58 @@ mod tests {
             "path_prefix = '/nested/a&b/%7Eroot'\n[indices]\n'Private_1.example' = ['https://user:secret@example.test/simple/{package}?token=private']\n[storage.fs]\nroot = 'artifacts'",
         ).unwrap();
         assert_eq!(settings.path_prefix, "/nested/a&b/%7Eroot/");
-        let template = &settings.indices["Private_1.example"][0];
+        let template = &settings.indices["Private_1.example"].sources[0];
         assert_eq!(
             template,
             "https://user:secret@example.test/simple/{package}/?token=private"
         );
         assert!(!settings.indices.contains_key("private_1.example"));
+    }
+
+    #[test]
+    fn index_arrays_and_objects_default_to_first_and_accept_explicit_merge() {
+        for (entry, policy) in [
+            (
+                "[indices]\ndefault = ['https://example.test/{package}/']",
+                IndexPolicy::First,
+            ),
+            (
+                "[indices.default]\nsources = ['https://example.test/{package}/']",
+                IndexPolicy::First,
+            ),
+            (
+                "[indices.default]\nsources = ['https://example.test/{package}/']\npolicy = 'first'",
+                IndexPolicy::First,
+            ),
+            (
+                "[indices.default]\nsources = ['https://example.test/{package}/']\npolicy = 'merge'",
+                IndexPolicy::Merge,
+            ),
+        ] {
+            let settings =
+                parse_settings(&format!("[storage.fs]\nroot = 'artifacts'\n{entry}")).unwrap();
+            assert_eq!(settings.indices["default"].policy, policy);
+            assert_eq!(
+                settings.indices["default"].sources,
+                ["https://example.test/{package}/"]
+            );
+        }
+        for entry in [
+            "sources = []\npolicy = 'unknown'",
+            "policy = 'merge'",
+            "sources = []\npolciy = 'merge'",
+        ] {
+            assert!(
+                parse_settings(&format!(
+                    "[storage.fs]\nroot = 'artifacts'\n[indices.default]\n{entry}"
+                ))
+                .is_err()
+            );
+        }
+        assert_eq!(
+            Settings::for_test().indices["default"].policy,
+            IndexPolicy::First
+        );
     }
 
     #[test]

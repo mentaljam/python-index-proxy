@@ -181,7 +181,11 @@ async fn slow_index_fetch_does_not_block_unrelated_requests() {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let mut settings = Settings::for_test();
-        settings.indices = [("default".into(), vec![format!("{endpoint}/{{package}}/")])].into();
+        settings.indices = [(
+            "default".into(),
+            vec![format!("{endpoint}/{{package}}/")].into(),
+        )]
+        .into();
         let mut config = opendal::services::FsConfig::default();
         config.root = Some(root.join("artifacts").to_str().unwrap().into());
         settings.storage = crate::storage::Storage::Fs(config);
@@ -316,4 +320,153 @@ fn template_placeholder_replacement_cannot_change_a_normalized_host() {
         template.package_url("foo-bar").unwrap().as_str(),
         "https://piprpackagemarker.example/foo%2Dbar/?token=private",
     );
+}
+
+#[tokio::test]
+async fn source_policy_selects_pages_in_order_and_never_falls_back_on_errors() {
+    use crate::settings::IndexPolicy::{First, Merge};
+    use axum::{
+        http::{StatusCode, header::CONTENT_TYPE},
+        routing::get,
+    };
+    use std::sync::atomic::AtomicUsize;
+
+    tokio::time::timeout(Duration::from_secs(15), async {
+        // Expected names and request counts follow the configured policy, not
+        // the parser's internal representation of an empty project.
+        for (policy, status, body, content_type, expected, second_requests) in [
+            (
+                First,
+                200,
+                "<a href='first.whl'>first.whl</a>",
+                "text/html",
+                Some(vec!["first.whl"]),
+                0,
+            ),
+            (
+                Merge,
+                200,
+                "<a href='first.whl'>first.whl</a>",
+                "text/html",
+                Some(vec!["first.whl", "second.whl"]),
+                1,
+            ),
+            (
+                First,
+                200,
+                "<!doctype html><html><body></body></html>",
+                "text/html",
+                Some(vec![]),
+                0,
+            ),
+            (
+                First,
+                200,
+                r#"{"meta":{"api-version":"1.0"},"name":"pkg","files":[]}"#,
+                "application/vnd.pypi.simple.v1+json",
+                Some(vec![]),
+                0,
+            ),
+            (
+                Merge,
+                200,
+                "<!doctype html><html><body></body></html>",
+                "text/html",
+                Some(vec!["second.whl"]),
+                1,
+            ),
+            (
+                First,
+                404,
+                "missing",
+                "text/html",
+                Some(vec!["second.whl"]),
+                1,
+            ),
+            (First, 429, "limited", "text/html", None, 0),
+            (First, 503, "unavailable", "text/html", None, 0),
+            (First, 200, "", "text/html", None, 0),
+            (
+                First,
+                200,
+                "<a href='http://[invalid'>bad</a>",
+                "text/html",
+                None,
+                0,
+            ),
+            (
+                First,
+                200,
+                "not-json",
+                "application/vnd.pypi.simple.v1+json",
+                None,
+                0,
+            ),
+        ] {
+            let requests = Arc::new(AtomicUsize::new(0));
+            let app = axum::Router::new()
+                .route(
+                    "/first/pkg/",
+                    get(move || async move {
+                        (
+                            StatusCode::from_u16(status).unwrap(),
+                            [(CONTENT_TYPE, content_type)],
+                            body,
+                        )
+                    }),
+                )
+                .route(
+                    "/second/pkg/",
+                    get({
+                        let requests = requests.clone();
+                        move || {
+                            let requests = requests.clone();
+                            async move {
+                                requests.fetch_add(1, Ordering::SeqCst);
+                                "<a href='second.whl'>second.whl</a>"
+                            }
+                        }
+                    }),
+                );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let (mut state, root) = index_failure_state(vec![
+                format!("{endpoint}/first/{{package}}/"),
+                format!("{endpoint}/second/{{package}}/"),
+            ]);
+            Arc::get_mut(&mut state.0)
+                .unwrap()
+                .indices
+                .get_mut("default")
+                .unwrap()
+                .policy = policy;
+            let result = state.package_detail("default", "pkg", None).await;
+            if let Some(expected) = expected {
+                let detail = result.unwrap().unwrap();
+                let mut names: Vec<_> = detail
+                    .files
+                    .values()
+                    .map(|file| file.filename.as_str())
+                    .collect();
+                names.sort_unstable();
+                assert_eq!(names, expected, "{policy:?} / {status} / {body}");
+                let cached = state
+                    .package_detail("default", "pkg", None)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(Arc::ptr_eq(&detail, &cached));
+            } else {
+                assert!(result.err().unwrap().is::<UpstreamIndexError>());
+                assert!(state.0.index_cache.get("default/pkg").await.is_none());
+            }
+            assert_eq!(requests.load(Ordering::SeqCst), second_requests);
+            server.abort();
+            drop(state);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    })
+    .await
+    .expect("policy cases must finish");
 }

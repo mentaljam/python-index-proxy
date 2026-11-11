@@ -8,7 +8,7 @@ use tokio::sync::{Mutex, Semaphore};
 
 use crate::{
     coordination::KeyedFlights,
-    index::{IndexRefresh, IndexUrlTemplate, PackageDetail, format_indices_list},
+    index::{ConfiguredIndex, IndexRefresh, IndexUrlTemplate, PackageDetail, format_indices_list},
     settings::{Limits, Settings, Upstream},
     shutdown::Shutdown,
 };
@@ -53,7 +53,15 @@ impl TryFrom<Settings> for State {
 
         let indices = indices
             .into_iter()
-            .map(|(slug, urls)| (slug, urls.into_iter().map(IndexUrlTemplate).collect()))
+            .map(|(slug, index)| {
+                (
+                    slug,
+                    ConfiguredIndex {
+                        sources: index.sources.into_iter().map(IndexUrlTemplate).collect(),
+                        policy: index.policy,
+                    },
+                )
+            })
             .collect();
 
         let storage = storage.operator(storage_http)?;
@@ -89,7 +97,7 @@ pub(crate) struct StateData {
     pub(crate) public_url: String,
     pub(crate) http_client: Client,
     pub(crate) index_cache: Cache<String, Arc<PackageDetail>>,
-    pub(crate) indices: HashMap<String, Vec<IndexUrlTemplate>>,
+    pub(crate) indices: HashMap<String, ConfiguredIndex>,
     indices_list: Bytes,
     pub(crate) storage: Operator,
     pub(crate) download_locks: KeyedFlights<Mutex<()>>,

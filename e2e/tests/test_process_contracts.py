@@ -130,7 +130,8 @@ def test_multiple_upstreams_skip_client_errors_and_recover_cold_artifacts(
     if skipped_first:
         sources = sources[::-1]
     proxy = proxy_factory(
-        index_templates=tuple(source.url + "/simple/{package}/" for source in sources)
+        index_templates=tuple(source.url + "/simple/{package}/" for source in sources),
+        index_policy="merge",
     )
     candidates = links(proxy, wheel.name)
     assert len(candidates) == 1
@@ -183,7 +184,8 @@ def test_multiple_upstreams_fail_closed_then_recover_full_index(
     if failed_first:
         sources = sources[::-1]
     proxy = proxy_factory(
-        index_templates=tuple(source.url + "/simple/{package}/" for source in sources)
+        index_templates=tuple(source.url + "/simple/{package}/" for source in sources),
+        index_policy="merge",
     )
     saved_links = links(proxy, first.name)
     assert len(saved_links) == 2
@@ -224,3 +226,43 @@ def test_multiple_upstreams_fail_closed_then_recover_full_index(
     }
     assert second_upstream.journal().count(page_path) == 4
     assert upstream.journal().count(page_path) >= 2
+
+
+@pytest.mark.parametrize("index_policy", [None, "first"])
+@pytest.mark.parametrize("first_status", [200, 404, 503])
+def test_first_source_policy_and_array_default(
+    proxy_factory: ProxyFactory,
+    upstream: Upstream,
+    second_upstream: Upstream,
+    index_policy: str | None,
+    first_status: int,
+) -> None:
+    first = make_wheel("pipr-e2e-priority", "1.0.0", "VALUE = 'first'\n")
+    second = make_wheel("pipr-e2e-priority", "2.0.0", "VALUE = 'second'\n")
+    upstream.publish(first)
+    second_upstream.publish(second)
+    page_path = f"/simple/{first.name}/"
+    if first_status != 200:
+        upstream.reply(page_path, Reply(first_status))
+    proxy = proxy_factory(
+        index_templates=tuple(
+            source.url + "/simple/{package}/" for source in (upstream, second_upstream)
+        ),
+        index_policy=index_policy,
+    )
+    if first_status == 503:
+        with pytest.raises(HTTPError) as error:
+            links(proxy, first.name)
+        assert error.value.code == 502
+    else:
+        candidates = links(proxy, first.name)
+        selected = second if first_status == 404 else first
+        assert len(candidates) == 1
+        assert unquote(urlsplit(candidates[0]).path).endswith("/" + selected.filename)
+        proxy.restart()
+        assert proxy.get(candidates[0]) == selected.content
+    assert second_upstream.journal() == (
+        [page_path, page_path, f"/files/{second.filename}"]
+        if first_status == 404
+        else []
+    )

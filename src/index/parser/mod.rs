@@ -15,9 +15,9 @@ pub(super) fn parse(
 ) -> anyhow::Result<ParsedProject> {
     match format {
         IndexFormat::Html => html::parse(package_url, content),
-        IndexFormat::JsonV1 => json::parse(package_url, package, content)
-            .map_err(|error| error.context(UpstreamIndexError)),
+        IndexFormat::JsonV1 => json::parse(package_url, package, content),
     }
+    .map_err(|error| error.context(UpstreamIndexError))
 }
 
 #[cfg(test)]

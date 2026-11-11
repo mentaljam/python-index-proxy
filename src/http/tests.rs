@@ -314,7 +314,7 @@ async fn upstream_index_failures_return_bad_gateway_without_caching_partial_page
             (vec!["503"], StatusCode::BAD_GATEWAY),
             (vec!["302"], StatusCode::BAD_GATEWAY),
             (vec!["body-error"], StatusCode::BAD_GATEWAY),
-            (vec!["invalid-url"], StatusCode::INTERNAL_SERVER_ERROR),
+            (vec!["invalid-url"], StatusCode::BAD_GATEWAY),
         ];
         for (sources, expected) in cases {
             let urls = sources
@@ -349,10 +349,16 @@ async fn upstream_index_failures_return_bad_gateway_without_caching_partial_page
             std::fs::remove_dir_all(root).unwrap();
         }
 
-        let (state, root) = index_failure_state(vec![
+        let (mut state, root) = index_failure_state(vec![
             format!("{endpoint}/200/{{package}}/"),
             format!("{endpoint}/recover/{{package}}/"),
         ]);
+        Arc::get_mut(&mut state.0)
+            .unwrap()
+            .indices
+            .get_mut("default")
+            .unwrap()
+            .policy = crate::settings::IndexPolicy::Merge;
         assert!(
             state
                 .get_detail("default".into(), "pkg".into())

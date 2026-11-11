@@ -1,11 +1,14 @@
 path_prefix = "/"
 
-[indices]
-default = [
+[indices.default]
+policy = "first"
+sources = [
     "https://download.pytorch.org/whl/cu121/{package}/",
     "https://pypi.org/simple/{package}/",
 ]
-torch-cu111 = ["https://download.pytorch.org/whl/cu111/{package}/"]
+
+[indices.torch-cu111]
+sources = ["https://download.pytorch.org/whl/cu111/{package}/"]
 
 [storage.s3]
 endpoint = "http://127.0.0.1:9000"

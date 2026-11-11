@@ -48,7 +48,7 @@ async fn uncacheable_package_details_remain_usable_for_the_current_request() {
         let mut settings = crate::settings::Settings::for_test();
         settings.indices = [(
             "default".into(),
-            vec![format!("{endpoint}/simple/{{package}}/")],
+            vec![format!("{endpoint}/simple/{{package}}/")].into(),
         )]
         .into();
         settings.index_cache = toml::from_str("max_capacity = '1 B'").unwrap();

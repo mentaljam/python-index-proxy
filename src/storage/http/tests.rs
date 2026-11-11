@@ -77,7 +77,7 @@ async fn storage_stat_timeout_and_permission_errors_do_not_fetch_upstream_and_ca
     settings.storage_http = deadlines();
     settings.indices = [(
         "default".into(),
-        vec![format!("{endpoint}/upstream/{{package}}/")],
+        vec![format!("{endpoint}/upstream/{{package}}/")].into(),
     )]
     .into();
     let state = crate::state::State::try_from(settings).unwrap();

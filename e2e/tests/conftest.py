@@ -98,6 +98,7 @@ def proxy_factory_fixture(
         *,
         storage_root: Path | None = None,
         index_templates: tuple[str, ...] | None = None,
+        index_policy: str | None = None,
         public_url: str | None = None,
     ) -> Proxy:
         directory = tmp_path / f"proxy-{len(proxies)}"
@@ -109,6 +110,7 @@ def proxy_factory_fixture(
             path_prefix,
             storage_root=storage_root,
             index_templates=index_templates,
+            index_policy=index_policy,
             public_url=public_url,
         )
         proxies.append(proxy)

@@ -15,6 +15,7 @@ use crate::{
     coordination::ResourceLimit,
     index::project::PreparedProject,
     paths::{encode_segment, valid_index_name},
+    settings::{Index, IndexPolicy},
     state::State,
 };
 
@@ -124,12 +125,12 @@ impl State {
         &self,
         index_slug: &str,
         package: &str,
-        url_templates: &[IndexUrlTemplate],
+        index: &ConfiguredIndex,
         permit: Arc<tokio::sync::OwnedSemaphorePermit>,
     ) -> anyhow::Result<Option<Arc<PackageDetail>>> {
         let data = &self.0;
         let mut project = PackageProject::default();
-        for template in url_templates {
+        for template in &index.sources {
             let Some(page) = crate::upstream::index_page(
                 &data.http_client,
                 template.package_url(package)?,
@@ -154,6 +155,9 @@ impl State {
                     Ok::<_, anyhow::Error>(project)
                 })
                 .await??;
+            if index.policy == IndexPolicy::First {
+                break;
+            }
         }
         let link_base = data.public_url.clone();
         let index_slug = index_slug.to_owned();
@@ -207,6 +211,11 @@ fn share_refresh_result(result: &RefreshResult) -> anyhow::Result<Option<Arc<Pac
             error
         }
     })
+}
+
+pub(crate) struct ConfiguredIndex {
+    pub(crate) sources: Vec<IndexUrlTemplate>,
+    pub(crate) policy: IndexPolicy,
 }
 
 #[derive(Clone)]
@@ -286,10 +295,7 @@ impl PackageDetail {
     }
 }
 
-pub(crate) fn format_indices_list(
-    link_base: &str,
-    indices: &HashMap<String, Vec<String>>,
-) -> String {
+pub(crate) fn format_indices_list(link_base: &str, indices: &HashMap<String, Index>) -> String {
     let mut list = "<!DOCTYPE html>\n<html>\n<body>".into();
     let link_base = link_base.replace('&', "&amp;");
     for index in indices.keys() {

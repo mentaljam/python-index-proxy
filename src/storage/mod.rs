@@ -175,7 +175,7 @@ mod tests {
         assert_eq!(settings.bind.to_string(), "127.0.0.1:3000");
         assert_eq!(settings.path_prefix, "/");
         assert_eq!(
-            settings.indices["default"],
+            settings.indices["default"].sources,
             ["https://pypi.org/simple/{package}/"]
         );
     }

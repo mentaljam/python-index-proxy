@@ -17,8 +17,6 @@ pub(super) struct ParsedProject {
     /// None means unknown; Some(empty) means a known empty set.
     pub(super) versions: Option<BTreeSet<String>>,
     pub(super) project_status: Option<ProjectStatus>,
-    /// JSON can identify an existing project even when it has no files.
-    pub(super) exists: bool,
 }
 
 pub(super) struct ParsedFile {
@@ -46,7 +44,6 @@ impl PackageProject {
             return;
         };
         project.files.append(&mut source.files);
-        project.exists |= source.exists;
         match (&mut project.versions, source.versions) {
             (Some(versions), Some(incoming)) => versions.extend(incoming),
             _ => project.versions = None,
@@ -63,7 +60,7 @@ impl PackageProject {
         index: &str,
         package: &str,
     ) -> Option<PreparedProject> {
-        let project = self.project.filter(|project| project.exists)?;
+        let project = self.project?;
         let link_base = format!(
             "{}packages/{}/{}/",
             link_base,

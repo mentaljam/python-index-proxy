@@ -168,12 +168,13 @@ Both tools target the project's minimum Python version, 3.12.
 - Two proxy processes use separate homes/logs and one shared filesystem artifact
   root. The second process reconstructs a link from the first, and the first
   then reads the completed shared object while upstream is unavailable.
-- Multiple sources skip 4xx responses except 408 and 429. The process tests cover
-  403/404/410 in either order, caching the successful merge and recovering cold
-  artifacts after restart. If every source is skipped, the proxy returns HTTP 404.
-  Any source's 408, 429 or 503 causes HTTP 502 for page and cold artifact recovery
-  routes, even with a healthy peer; partial pages are not cached. After recovery
-  the complete candidate set and both artifact bodies are returned.
+- Source arrays default to `first`: the first successful project page wins,
+  including pages with no files. Object configuration accepts `sources` and
+  `policy = "first"` or `"merge"`; explicit `merge` combines every source.
+  As before, HTTP 4xx except 408 and 429 advance to the next source; other upstream errors return 502.
+  Merge tests cover missing sources in either order, cache reuse and cold artifact
+  recovery. Any source failure prevents caching a partial merged page; recovery
+  returns the complete candidate set and both artifact bodies.
 - Invalid configuration fails before binding its port, with field-specific
   diagnostics that do not echo source credentials. Nested/percent-encoded path
   prefixes work, including HTML escaping for ampersands.

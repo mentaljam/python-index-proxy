@@ -17,6 +17,10 @@ struct PendingAnchor {
 }
 
 pub(super) fn parse(package_url: &Url, content: &[u8]) -> anyhow::Result<ParsedProject> {
+    anyhow::ensure!(
+        !content.iter().all(u8::is_ascii_whitespace),
+        "Empty upstream HTML page"
+    );
     let mut files = Vec::new();
     let mut anchor: Option<PendingAnchor> = None;
     // Context-aware tokenization excludes apparent links in raw text and RCDATA.
@@ -47,7 +51,6 @@ pub(super) fn parse(package_url: &Url, content: &[u8]) -> anyhow::Result<ParsedP
     }
     finish_anchor(&mut files, &mut anchor);
     Ok(ParsedProject {
-        exists: !files.is_empty(),
         files,
         versions: None,
         project_status: None,

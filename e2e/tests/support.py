@@ -302,6 +302,7 @@ class Proxy:
         *,
         storage_root: Path | None = None,
         index_templates: tuple[str, ...] | None = None,
+        index_policy: str | None = None,
         public_url: str | None = None,
     ) -> None:
         self.binary = binary
@@ -329,9 +330,14 @@ class Proxy:
                 if public_url is not None
                 else ""
             )
-            + "[indices]\n"
-            f"default = {json.dumps(templates)}\n"
-            "[storage.fs]\n"
+            + (
+                f"[indices]\ndefault = {json.dumps(templates)}\n"
+                if index_policy is None
+                else "[indices.default]\n"
+                f"sources = {json.dumps(templates)}\n"
+                f"policy = {json.dumps(index_policy)}\n"
+            )
+            + "[storage.fs]\n"
             f"root = {json.dumps(str(storage_root if storage_root is not None else root / 'artifacts'))}\n"
         )
         self.opener = build_opener(ProxyHandler({}))
@@ -406,6 +412,7 @@ class ProxyFactory(Protocol):
         *,
         storage_root: Path | None = None,
         index_templates: tuple[str, ...] | None = None,
+        index_policy: str | None = None,
         public_url: str | None = None,
     ) -> Proxy: ...
 

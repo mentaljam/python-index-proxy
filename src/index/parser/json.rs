@@ -48,6 +48,5 @@ pub(super) fn parse(
             .versions
             .map(|versions| versions.into_iter().collect()),
         project_status: detail.project_status,
-        exists: true,
     })
 }
