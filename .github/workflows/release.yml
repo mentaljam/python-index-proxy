@@ -16,6 +16,42 @@ jobs:
     name: Release checks
     uses: ./.github/workflows/ci.yml
 
+  crate:
+    name: Publish crate to crates.io
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      MISE_DISABLE_TOOLS: helm,python,uv,ruff,ty
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7.0.1
+
+      - name: Set up Rust with mise
+        uses: jdx/mise-action@v5.2.7
+        with:
+          version: "2026.11.6"
+          install_args: rust
+
+      - name: Cache Cargo dependencies and build outputs
+        uses: Swatinem/rust-cache@v2.9.3
+
+      # Verify the packaged sources before requesting the short-lived token.
+      - name: Package and verify crate
+        run: cargo package --locked
+
+      - name: Authenticate with crates.io
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish verified crate
+        run: cargo publish --locked --no-verify
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
   image-build:
     name: Build image (${{ matrix.arch }})
     needs: checks

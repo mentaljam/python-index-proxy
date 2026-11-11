@@ -2,6 +2,22 @@
 name = "python-index-proxy"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "A caching Python package index proxy with configurable upstream sources, filesystem and cloud storage, pip/uv support, and Kubernetes deployment."
+authors = ["Petr Tsymbarovich"]
+repository = "https://github.com/mentaljam/python-index-proxy"
+homepage = "https://github.com/mentaljam/python-index-proxy"
+documentation = "https://github.com/mentaljam/python-index-proxy?tab=readme-ov-file"
+readme = "README.md"
+keywords = ["python", "pypi", "proxy", "cache", "pip"]
+categories = ["network-programming", "web-programming::http-server", "command-line-utilities"]
+include = [
+    "/src/**",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/LICENSE",
+]
 
 [profile.release]
 codegen-units = 1

@@ -7,7 +7,13 @@ configured filesystem or object store.
 
 ## Install
 
-Install from GitHub with Rust/Cargo:
+Install from crates.io with Rust/Cargo:
+
+```sh
+cargo install python-index-proxy --locked
+```
+
+Alternatively, install from GitHub:
 
 ```sh
 cargo install --git https://github.com/mentaljam/python-index-proxy --locked

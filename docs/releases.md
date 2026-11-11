@@ -9,7 +9,8 @@ exposes `workflow_call` so release checks use the same commands against the
 tagged commit, with the test container build skipped.
 
 `.github/workflows/release.yml` runs for version tags matching `v[0-9]*`. It first
-calls CI, then publishes the image, and finally packages and publishes the chart.
+calls CI, then publishes the crate and builds the image in parallel. Once the
+image is published, it packages and publishes the chart.
 The chart job waits for the image publication to succeed. The workflows use
 separate concurrency groups so a release does not conflict with its nested CI.
 
@@ -44,7 +45,7 @@ support. Prerelease versions are supported.
 
 Before a release, update the versions in Cargo.toml and Chart.yaml together and
 refresh Cargo.lock. Bump the shared version even for a chart-only change: every
-release publishes both an image and a chart. Version bumps belong to release
+release publishes the crate, image and chart. Version bumps belong to release
 preparation, not every intermediate PR. Compatibility covers application behavior
 and the chart's public configuration.
 
@@ -73,3 +74,38 @@ See the chart README for OCI installation examples.
 
 
 Release images are built for Linux AMD64 and ARM64; ordinary CI builds AMD64.
+
+## crates.io Trusted Publishing
+
+The crate must already exist on crates.io; an initial bootstrap publication is
+separate from the automated release. Configure its GitHub Trusted Publisher with:
+
+- Owner: `mentaljam`
+- Repository: `python-index-proxy`
+- Workflow filename: `release.yml`
+- Environment: leave unset (the publishing job does not use a GitHub environment)
+
+The release job requests an OIDC token with `id-token: write` and exchanges it
+through `rust-lang/crates-io-auth-action`. No persistent crates.io token or GitHub
+secret is needed. See the [Trusted Publishing guide](https://crates.io/docs/trusted-publishing).
+
+After the shared CI checks, `cargo package --locked` verifies that the packaged
+sources build. Only then does the job obtain the short-lived token and run
+`cargo publish --locked --no-verify`, avoiding a second verification build while
+the token is active. No source changes occur between packaging and publishing.
+The action revokes the token when the job finishes.
+
+## Release procedure
+
+1. Update the shared version and lockfile, including for chart-only releases.
+   The version must not already be published on crates.io.
+2. Run `mise run ci`, commit the release changes, and run `cargo package --locked`
+   from the clean checkout to verify the distributable package.
+3. Push the release commit and its matching `v<version>` tag. The tag triggers
+   publication of the crate, image and chart from that commit.
+4. Check all publishing jobs: publication across the registries is not atomic.
+
+On partial failure, rerun only failed jobs. A successfully published crate version
+cannot be published again or overwritten. Do not move a published release tag;
+source fixes require a new shared version. Prerelease tags publish their matching
+crate/image/chart versions without updating the container's `latest` tag.
