@@ -1,19 +1,15 @@
 from __future__ import annotations
 
-import json
 import shutil
-import subprocess
 from collections.abc import Generator, Iterator
 from pathlib import Path
 from typing import cast
 
 import pytest
-from xdist.workermanage import WorkerController
 
 from support import Client, Proxy, ProxyFactory, Upstream, Wheel, make_wheel
 
 PROXIES = pytest.StashKey[list[Proxy]]()
-PROXY_BINARY = pytest.StashKey[Path]()
 
 
 @pytest.hookimpl(wrapper=True)
@@ -31,67 +27,22 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
         "--proxy-binary",
         type=Path,
-        help="Use an existing proxy executable instead of building with Cargo",
+        default=Path(__file__).resolve().parents[2]
+        / "target"
+        / "debug"
+        / "python-index-proxy",
+        help="Path to a prebuilt proxy executable (default: target/debug/python-index-proxy)",
     )
-
-
-@pytest.hookimpl(tryfirst=True)
-def pytest_sessionstart(session: pytest.Session) -> None:
-    config = session.config
-    if not hasattr(config, "workerinput") and config.getoption("numprocesses"):
-        # Finish the shared build before xdist starts any worker processes.
-        config.stash[PROXY_BINARY] = resolve_proxy_binary(config)
-
-
-def pytest_configure_node(node: WorkerController) -> None:
-    node.workerinput["proxy_binary"] = str(node.config.stash[PROXY_BINARY])
 
 
 @pytest.fixture(name="proxy_binary", scope="session")
 def proxy_binary_fixture(request: pytest.FixtureRequest) -> Path:
-    workerinput = cast(
-        "dict[str, object] | None", getattr(request.config, "workerinput", None)
-    )
-    if workerinput is not None:
-        return Path(cast("str", workerinput["proxy_binary"]))
-    return resolve_proxy_binary(request.config)
-
-
-def resolve_proxy_binary(config: pytest.Config) -> Path:
-    supplied = cast("Path | None", config.getoption("--proxy-binary"))
-    if supplied is not None:
-        binary = supplied.resolve()
-        if not binary.is_file():
-            pytest.fail(f"Proxy binary does not exist: {binary}")
-        return binary
-    root = Path(__file__).resolve().parents[2]
-    try:
-        build = subprocess.run(
-            [  # noqa: S607 - Resolve the installed Cargo through PATH.
-                "cargo",
-                "build",
-                "--locked",
-                "--no-default-features",
-                "--message-format=json",
-            ],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            timeout=300,
-            check=False,
+    binary = cast("Path", request.config.getoption("--proxy-binary")).resolve()
+    if not binary.is_file():
+        pytest.fail(
+            f"Proxy binary does not exist: {binary}. Run `just build-e2e` first."
         )
-    except subprocess.TimeoutExpired:
-        pytest.fail("Cargo build timed out after 300 seconds")
-    assert build.returncode == 0, build.stdout + build.stderr
-    for line in build.stdout.splitlines():
-        event = json.loads(line)
-        if (
-            event.get("reason") == "compiler-artifact"
-            and event.get("executable")
-            and event["target"]["name"] == "python-index-proxy"
-        ):
-            return Path(event["executable"])
-    pytest.fail("Cargo did not report a python-index-proxy executable")
+    return binary
 
 
 @pytest.fixture(name="uv_binary", scope="session")

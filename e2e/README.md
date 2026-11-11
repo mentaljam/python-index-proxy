@@ -89,61 +89,53 @@ Prerequisites: Rust/Cargo, uv, and an installed Python >= 3.12 with `venv` and
 pip for client environments. uv is taken from `PATH`. Client versions therefore
 depend on the test environment; `uv.lock` pins pytest, pytest-xdist, Ruff and ty dependencies.
 
-From this directory:
+From the repository root (requires just):
 
 ```sh
-uv sync --locked --no-python-downloads
+just e2e
+just e2e -n 2 -q
+just e2e -k 'cold_install or restart'
+```
+
+The `e2e` recipe depends on `build-e2e`, which runs
+`cargo build --locked --no-default-features` before starting pytest. Tests never
+build the proxy. Normal Cargo and uv dependency setup may require network access.
+Once dependencies are cached, the suite only needs loopback TCP sockets.
+
+To run pytest directly, build the executable first with `just build-e2e` (or the
+Cargo command above), then run from this directory:
+
+```sh
 uv run --locked --no-python-downloads pytest -q
 ```
 
-Or from the repository root:
+By default, tests use `target/debug/python-index-proxy` in the repository root.
+To use another prebuilt executable, including a custom Cargo target directory:
 
 ```sh
-uv run --project e2e --locked --no-python-downloads pytest -c e2e/pyproject.toml e2e/tests
+uv run --locked --no-python-downloads pytest --proxy-binary /path/to/python-index-proxy
 ```
 
-The session builds the proxy once with
-`cargo build --locked --no-default-features --features storage-fs`. Normal Cargo
-and uv dependency setup may require network access. Once dependencies are cached,
-the suite only needs loopback TCP sockets. To use a prebuilt executable:
-
-```sh
-uv run --locked --no-python-downloads pytest --proxy-binary ../target/debug/python-index-proxy
-```
-
-Parallel execution is opt-in through pytest-xdist. Start with two workers:
-
-```sh
-uv run --locked --no-python-downloads pytest -n 2 -q
-```
-
-The controller builds the proxy once before starting workers and passes the same
-absolute executable path to every worker. `--proxy-binary` also works with
-parallel runs and skips Cargo entirely. Serial runs retain a lazy session build.
-Each test keeps its own client environments, upstream server and artifact root.
+Parallel execution defaults to `-n auto` through pytest-xdist. Every worker uses
+the same prebuilt executable. Each test keeps its own client environments,
+upstream server and artifact root.
 
 Compare worker counts with the same prebuilt executable to exclude build time:
 
 ```sh
-uv run --locked --no-python-downloads pytest -n 0 --proxy-binary ../target/debug/python-index-proxy
-uv run --locked --no-python-downloads pytest -n 2 --proxy-binary ../target/debug/python-index-proxy
-uv run --locked --no-python-downloads pytest -n 4 --proxy-binary ../target/debug/python-index-proxy
+uv run --locked --no-python-downloads pytest -n 0
+uv run --locked --no-python-downloads pytest -n 2
+uv run --locked --no-python-downloads pytest -n 4
 ```
 
 `-n 0` runs serially. More workers compete for CPU and disk while creating venvs
 and running installers, so choose the worker count from local measurements rather
 than assuming `-n auto` is fastest. Parallelism does not suppress expected failures.
 
-Run a subset using ordinary pytest selectors:
-
-```sh
-uv run --locked --no-python-downloads pytest -k 'cold_install or restart'
-uv run --locked --no-python-downloads pytest -k html5_unquoted
-```
-
 ## Static checks
 
-Run from this directory:
+Run `just check` from the repository root for Rust and Python checks, or run
+Python checks from this directory:
 
 ```sh
 uv run --locked --no-python-downloads ruff check .
