@@ -23,6 +23,7 @@ pub(crate) fn index_failure_state(sources: Vec<String>) -> (State, std::path::Pa
 
 pub(crate) fn page(html: &'static [u8]) -> Arc<PackageDetail> {
     Arc::new(PackageDetail {
+        json: Bytes::new(),
         html: Bytes::from_static(html),
         files: HashMap::new(),
     })

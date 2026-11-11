@@ -13,13 +13,15 @@ use uv_normalize::PackageName;
 
 use crate::{
     coordination::ResourceLimit,
+    index::project::PreparedProject,
     paths::{encode_segment, valid_index_name},
     state::State,
 };
 
 mod parser;
+pub(crate) mod project;
 
-use parser::DetailParser;
+use project::PackageProject;
 
 #[derive(Debug)]
 pub struct UpstreamIndexError;
@@ -45,6 +47,7 @@ impl State {
         ))
     }
 
+    #[cfg(test)]
     pub async fn get_detail(
         &self,
         index_slug: String,
@@ -120,9 +123,9 @@ impl State {
         permit: Arc<tokio::sync::OwnedSemaphorePermit>,
     ) -> anyhow::Result<Option<Arc<PackageDetail>>> {
         let data = &self.0;
-        let mut parser = DetailParser::new(&data.public_url, index_slug, package);
+        let mut project = PackageProject::default();
         for template in url_templates {
-            let Some((final_url, content)) = crate::upstream::index_page(
+            let Some(page) = crate::upstream::index_page(
                 &data.http_client,
                 template.package_url(package)?,
                 data.upstream,
@@ -135,16 +138,31 @@ impl State {
             // A started blocking parse survives cancellation of its async caller.
             let parsing_permit = permit.clone();
             // Parsing is CPU-bound and must not monopolize an async worker.
-            parser = data
+            let package_name = package.to_owned();
+            project = data
                 .shutdown
                 .spawn_blocking(move || {
                     let _permit = parsing_permit;
-                    parser.parse_html(&final_url, &content)?;
-                    Ok::<_, anyhow::Error>(parser)
+                    let parsed =
+                        parser::parse(page.format, &page.url, &package_name, &page.content)?;
+                    project.merge(parsed);
+                    Ok::<_, anyhow::Error>(project)
                 })
                 .await??;
         }
-        Ok(parser.finalize().map(Arc::new))
+        let link_base = data.public_url.clone();
+        let index_slug = index_slug.to_owned();
+        let package = package.to_owned();
+        data.shutdown
+            .spawn_blocking(move || {
+                let _permit = permit;
+                project
+                    .prepare(&link_base, &index_slug, &package)
+                    .map(PreparedProject::render)
+                    .transpose()
+                    .map(|detail| detail.map(Arc::new))
+            })
+            .await?
     }
 }
 
@@ -247,17 +265,19 @@ pub(crate) struct ArtifactSource {
 }
 pub(crate) struct PackageDetail {
     pub(crate) html: Bytes,
+    pub(crate) json: Bytes,
     pub(crate) files: HashMap<String, ArtifactSource>,
 }
 impl PackageDetail {
     pub(crate) fn byte_len(&self) -> usize {
-        self.files
-            .iter()
-            .fold(self.html.len(), |size, (hash, source)| {
+        self.files.iter().fold(
+            self.html.len().saturating_add(self.json.len()),
+            |size, (hash, source)| {
                 size.saturating_add(hash.len())
                     .saturating_add(source.url.len())
                     .saturating_add(source.filename.len())
-            })
+            },
+        )
     }
 }
 

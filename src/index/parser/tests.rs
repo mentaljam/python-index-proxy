@@ -1,13 +1,25 @@
-use super::*;
+use url::Url;
+
+use super::html;
+use crate::index::{PackageDetail, project::PackageProject};
+
+fn render_html(link_base: &str, base: &Url, content: &[u8]) -> PackageDetail {
+    let mut project = PackageProject::default();
+    project.merge(html::parse(base, content).unwrap());
+    project
+        .prepare(link_base, "default", "pkg")
+        .unwrap()
+        .render()
+        .unwrap()
+}
 
 #[test]
 fn html5_links_preserve_decoded_attributes_text_and_source_urls() {
     let base = Url::parse("https://index.example/simple/pkg/").unwrap();
-    let mut parser = DetailParser::new("/proxy/", "default", "pkg");
-    parser
-        .parse_html(
-            &base,
-            br#"<!doctype html><HTML><HEAD>
+    let detail = render_html(
+        "/proxy/",
+        &base,
+        br#"<!doctype html><HTML><HEAD>
         <meta charset=utf-8><TITLE>Packages</TITLE></HEAD><BODY>
         <A HREF=first.whl DATA-REQUIRES-PYTHON='&gt;=3.12' DATA-YANKED
            DATA-CORE-METADATA='sha256=abc' DATA-DIST-INFO-METADATA='sha256=abc'
@@ -15,9 +27,7 @@ fn html5_links_preserve_decoded_attributes_text_and_source_urls() {
         <a>not a file</a>
         <a href='second.whl?x=1&amp;y=2#sha256=ab&amp;extra=cd'>second&#46;whl &amp; &lt;tag&gt;
         "#,
-        )
-        .unwrap();
-    let detail = parser.finalize().unwrap();
+    );
     assert_eq!(detail.files.len(), 2);
     let html = std::str::from_utf8(&detail.html).unwrap();
     assert!(html.contains("data-requires-python=\"&gt;=3.12\""));
@@ -50,11 +60,9 @@ fn tokenizer_ignores_apparent_links_in_raw_text_and_rcdata() {
     for tag in [
         "script", "style", "title", "textarea", "iframe", "xmp", "noembed", "noframes",
     ] {
-        let mut parser = DetailParser::new("/", "default", "pkg");
         let input =
             format!("<{tag}><a href=fake.whl>fake.whl</a></{tag}><a href=real.whl>real.whl</a>");
-        parser.parse_html(&base, input.as_bytes()).unwrap();
-        let detail = parser.finalize().unwrap();
+        let detail = render_html("/", &base, input.as_bytes());
         assert_eq!(detail.files.len(), 1, "{tag}");
         let source = detail.files.values().next().unwrap();
         assert_eq!(
@@ -70,11 +78,9 @@ fn tokenizer_ignores_apparent_links_in_raw_text_and_rcdata() {
 #[test]
 fn tokenizer_closes_adjacent_and_unterminated_anchors() {
     let base = Url::parse("https://index.example/simple/pkg/").unwrap();
-    let mut parser = DetailParser::new("/", "default", "pkg");
-    parser.parse_html(&base,
+    let detail = render_html("/", &base,
         b"<a href=first.whl>first<span>.whl</span><a href=second.whl>second.whl<a>not a file</a><a href=last.whl>last.whl"
-    ).unwrap();
-    let detail = parser.finalize().unwrap();
+    );
     assert_eq!(detail.files.len(), 3);
     let html = std::str::from_utf8(&detail.html).unwrap();
     for filename in ["first.whl", "second.whl", "last.whl"] {
@@ -87,9 +93,7 @@ fn tokenizer_closes_adjacent_and_unterminated_anchors() {
 #[test]
 fn ignored_anchor_targets_end_the_previous_link_without_leaking_text() {
     let base = Url::parse("https://index.example/simple/pkg/").unwrap();
-    let mut parser = DetailParser::new("/", "default", "pkg");
-    parser.parse_html(&base, b"outside</a><a href=first.whl>first.whl<a href=directory/>ignored</a>outside<a href=last.whl>last.whl</a>outside").unwrap();
-    let detail = parser.finalize().unwrap();
+    let detail = render_html("/", &base, b"outside</a><a href=first.whl>first.whl<a href=directory/>ignored</a>outside<a href=last.whl>last.whl</a>outside");
     let html = std::str::from_utf8(&detail.html).unwrap();
     assert_eq!(detail.files.len(), 2);
     assert!(html.contains(">first.whl</a><br/>"));
@@ -102,9 +106,7 @@ fn ignored_anchor_targets_end_the_previous_link_without_leaking_text() {
 #[test]
 fn rewritten_file_links_preserve_fragments_and_resolve_sources() {
     let base = Url::parse("https://index.example.test/simple/pkg/").unwrap();
-    let mut parser = DetailParser::new("/proxy/", "default", "pkg");
-    parser.parse_html(&base, b"<a href='../../files/pkg.whl?download=1&amp;x=2#sha256=abc'>pkg.whl</a><a href='plain.zip'>plain.zip</a>").unwrap();
-    let detail = parser.finalize().unwrap();
+    let detail = render_html("/proxy/", &base, b"<a href='../../files/pkg.whl?download=1&amp;x=2#sha256=abc'>pkg.whl</a><a href='plain.zip'>plain.zip</a>");
     let html = std::str::from_utf8(&detail.html).unwrap();
     assert!(html.contains("/proxy/packages/default/pkg/"));
     assert!(html.contains("/pkg%2Ewhl#sha256=abc\""));
@@ -118,14 +120,11 @@ fn rewritten_file_links_preserve_fragments_and_resolve_sources() {
         source.url,
         "https://index.example.test/files/pkg.whl?download=1&x=2"
     );
-    let mut other = DetailParser::new("/", "default", "pkg");
-    other
-        .parse_html(
-            &Url::parse("https://other.example/simple/pkg/").unwrap(),
-            b"<a href='plain.zip'>plain.zip</a>",
-        )
-        .unwrap();
-    let other = other.finalize().unwrap();
+    let other = render_html(
+        "/",
+        &Url::parse("https://other.example/simple/pkg/").unwrap(),
+        b"<a href='plain.zip'>plain.zip</a>",
+    );
     let first_id = detail
         .files
         .iter()

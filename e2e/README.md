@@ -50,6 +50,38 @@ Project enumeration is not supported. The informational root does not implement
 the Simple Repository API's complete project-list requirement; package detail
 and artifact routes remain available for requests for named projects.
 
+## Package response formats
+
+`/{index}/{package}/` supports `application/vnd.pypi.simple.v1+json`,
+`application/vnd.pypi.simple.v1+html`, and legacy `text/html` through `Accept`.
+Quality values, wildcards, exclusions (`q=0`), and the `latest` alias are supported.
+Without `Accept`, the response remains `text/html`. Equal preferences favor JSON;
+an unsupported selection returns 406. Responses vary on `Accept`, independently
+of compression negotiation.
+
+HTML and JSON v1 have independent parsers that return one source's `ParsedProject`.
+`PackageProject` combines those results; preparation assigns local artifact URLs.
+Separate HTML and JSON renderers produce the cached response bodies. The JSON
+parser handles all supported v1 minor versions, including 1.4. HTML tokenizer
+state is local to the HTML parser; source link text and additional or noncanonical
+attributes are retained separately from normalized distribution metadata.
+
+Upstream requests prefer JSON and accept HTML as a fallback. Both formats feed a
+shared package model; distribution URLs point to the proxy, including `.metadata`
+access. JSON responses declare API 1.4 when every contributing source supplies
+`versions` and every file has a known `size`. Otherwise they declare API 1.0;
+no file requests are made to discover sizes. Versions are combined without
+duplicates when all sources provide them. Optional file metadata is preserved
+where supported, and a project status is exposed only when all contributing
+sources agree. Repository trust declarations (`tracks` and `alternate-locations`)
+are not copied from upstreams to the merged proxy repository.
+
+HTML-only upstreams remain supported, including legacy pages with absent or
+`text/plain` content types. JSON parsing uses the upstream response content type;
+malformed JSON or unsupported JSON major versions fail the refresh with 502,
+without caching partial results. An existing empty JSON project returns an empty
+file list. The index root remains informational and does not enumerate projects.
+
 ## Run
 
 Prerequisites: Rust/Cargo, uv, and an installed Python >= 3.12 with `venv` and

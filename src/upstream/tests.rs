@@ -130,7 +130,7 @@ async fn chunked_page_limit_accepts_exact_boundary_and_rejects_one_byte_more() {
         });
         let result = index_page(&Client::new(), url, Upstream::default(), 4).await;
         if accepted {
-            assert_eq!(result.unwrap().unwrap().1, "abcd");
+            assert_eq!(result.unwrap().unwrap().content, "abcd");
         } else {
             let error = result.unwrap_err();
             assert!(error.is::<UpstreamIndexError>());

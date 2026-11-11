@@ -118,6 +118,7 @@ async fn stale_cached_page_refreshes_for_an_unknown_artifact_identifier() {
             .unwrap();
         let id = fresh.files.keys().next().unwrap().clone();
         let stale = Arc::new(PackageDetail {
+            json: Bytes::new(),
             html: Bytes::from_static(b"old page"),
             files: [(
                 "f".repeat(64),

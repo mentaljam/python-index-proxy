@@ -325,6 +325,7 @@ async fn upstream_index_failures_return_bad_gateway_without_caching_partial_page
             let response = super::get_detail(
                 axum::extract::State(state.clone()),
                 Path(("default".into(), "pkg".into())),
+                axum::http::HeaderMap::new(),
             )
             .await;
             assert_eq!(response.status(), expected, "sources: {sources:?}");
@@ -390,6 +391,7 @@ async fn upstream_connection_failure_is_bad_gateway_for_index_and_artifact() {
     let index = super::get_detail(
         axum::extract::State(state.clone()),
         axum::extract::Path(("default".into(), "pkg".into())),
+        axum::http::HeaderMap::new(),
     )
     .await;
     assert_eq!(index.status(), axum::http::StatusCode::BAD_GATEWAY);

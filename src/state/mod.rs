@@ -41,7 +41,7 @@ impl TryFrom<Settings> for State {
         let index_cache = Cache::builder()
             .time_to_live(index_cache.ttl.into())
             .max_capacity(index_cache.max_capacity.into())
-            // Account for key, rendered HTML and source mappings, not allocator overhead.
+            // Account for key, rendered HTML/JSON and source mappings, not allocator overhead.
             .weigher(|key: &String, value: &Arc<PackageDetail>| {
                 u32::try_from(key.len().saturating_add(value.byte_len())).unwrap_or(u32::MAX)
             })

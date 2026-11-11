@@ -3,7 +3,7 @@ use bytes::{Bytes, BytesMut};
 use reqwest::{Client, Response};
 use url::Url;
 
-use crate::{index::UpstreamIndexError, settings::Upstream};
+use crate::{index::UpstreamIndexError, models::IndexFormat, settings::Upstream};
 
 pub(crate) async fn send(
     client: &Client,
@@ -30,14 +30,29 @@ pub(crate) async fn chunk(
         .context(UpstreamIndexError)
 }
 
+#[derive(Debug)]
+pub(crate) struct IndexPage {
+    pub(crate) url: Url,
+    pub(crate) format: IndexFormat,
+    pub(crate) content: Bytes,
+}
+
 pub(crate) async fn index_page(
     client: &Client,
     url: Url,
     settings: Upstream,
     max_size: u64,
-) -> anyhow::Result<Option<(Url, Bytes)>> {
+) -> anyhow::Result<Option<IndexPage>> {
     tokio::time::timeout(settings.index_download_timeout, async {
-        let mut response = send(client, url, settings).await?;
+        let mut response = tokio::time::timeout(
+            settings.response_header_timeout,
+            client
+                .get(url)
+                .header(reqwest::header::ACCEPT, crate::models::INDEX_ACCEPT)
+                .send(),
+        )
+        .await
+        .context("Upstream response header timeout")??;
         let status = response.status();
         if status.is_client_error()
             && !matches!(
@@ -53,6 +68,12 @@ pub(crate) async fn index_page(
             response.url(),
             response.status()
         );
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("");
+        let format = IndexFormat::from_content_type(content_type)?;
         let url = response.url().clone();
         let mut content = BytesMut::new();
         while let Some(chunk) = chunk(&mut response, settings).await? {
@@ -62,7 +83,11 @@ pub(crate) async fn index_page(
             );
             content.extend_from_slice(&chunk);
         }
-        Ok(Some((url, content.freeze())))
+        Ok(Some(IndexPage {
+            url,
+            format,
+            content: content.freeze(),
+        }))
     })
     .await
     .context("Upstream index download timeout")

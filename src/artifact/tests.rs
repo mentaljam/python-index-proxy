@@ -379,6 +379,7 @@ async fn failed_download_fixture(
     settings.storage = crate::storage::Storage::Fs(config);
     let state = State::try_from(settings).unwrap();
     let detail = Arc::new(PackageDetail {
+        json: Bytes::new(),
         html: Bytes::new(),
         files: [(
             "abcd0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab".into(),

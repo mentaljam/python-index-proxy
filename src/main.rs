@@ -3,11 +3,11 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::{http::get_router, settings::Settings};
 
-// mod models;
 mod artifact;
 mod coordination;
 mod http;
 mod index;
+mod models;
 mod paths;
 mod settings;
 mod shutdown;

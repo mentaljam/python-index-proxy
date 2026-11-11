@@ -276,6 +276,7 @@ async fn index_cache_capacity_counts_key_and_payload_bytes() {
 
     let mappings_only = Arc::new(PackageDetail {
         html: Bytes::new(),
+        json: Bytes::new(),
         files: [(
             "abc".into(),
             ArtifactSource {
