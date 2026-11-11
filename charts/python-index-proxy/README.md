@@ -2,8 +2,7 @@
 
 Deploys the proxy, its configuration and Service, with optional PVC, Ingress,
 HTTPRoute and ServiceMonitor. It does not deploy storage services, create buckets,
-install CRDs, or configure collectors. CI and image/chart publication are managed
-separately.
+install CRDs, or configure collectors.
 
 ## Installation
 
@@ -12,13 +11,11 @@ own APIs: `gateway.networking.k8s.io/v1` for HTTPRoute and
 `monitoring.coreos.com/v1` for ServiceMonitor.
 
 The default image reference is
-`ghcr.io/mentaljam/python-index-proxy:<Chart.appVersion>`. The referenced image
-must first be built and published; this chart does not publish it. Override
+`ghcr.io/mentaljam/python-index-proxy:<Chart.appVersion>`. Override
 `image.repository`, `image.tag`, or `image.digest` when using another image.
 A digest takes precedence over the tag. The repository Dockerfile enables
-`fs`, `s3`, `gcs`, `azblob` and metrics by default. Other backends require a custom
-build with the corresponding Cargo features. The current Dockerfile targets
-x86-64 Linux.
+fs, s3, gcs, azblob and metrics by default. Other backends require a custom
+build with the corresponding Cargo features. Release images target Linux AMD64 and ARM64.
 
 Explicitly configure exactly one backend in `config.storage`. Default values
 intentionally fail schema validation until storage is selected:
@@ -35,19 +32,17 @@ helm install proxy charts/python-index-proxy --namespace packages --create-names
 The examples are templates for your own values: substitute endpoints, bucket names,
 public URLs, Secret names and image tags before installing.
 
-After the corresponding release has been published, install directly from GHCR:
+Set `VERSION` to the desired published release, then install directly from GHCR:
 
 ```sh
 helm install proxy oci://ghcr.io/mentaljam/charts/python-index-proxy \
-  --version 0.1.0 --namespace packages --create-namespace -f my-values.yaml
+  --version "$VERSION" --namespace packages --create-namespace -f my-values.yaml
 ```
 
-The chart's `version` and `appVersion` match the Cargo package version. CI checks
-this agreement and the release workflow packages Chart.yaml unchanged. The OCI
-artifact contains the entire chart archive, including `values.schema.json`.
-Helm uses that embedded schema to validate your values during install, upgrade,
-lint and template operations. No separate schema download is needed. The schema
-URL comment in values.yaml serves editor validation for copied values files.
+The chart's `version` and `appVersion` follow the shared application release.
+Helm validates supplied values using the schema embedded in the chart package.
+For publication details, see the repository's
+[release guide](https://github.com/mentaljam/python-index-proxy/blob/main/docs/releases.md).
 
 ## Configuration and credentials
 
@@ -76,7 +71,7 @@ config:
       disable_ec2_metadata: true
 ```
 
-Use native OpenDAL option names and types for the chosen backend. For example,
+Use the native option names and types for the chosen storage backend. For example,
 GCS uses `storage.gcs.bucket`, and Azure Blob uses `storage.azblob.container` and
 `account_name`. The schema recognizes application backend names but leaves their
 native options extensible. The application validates backend-specific options and
@@ -126,14 +121,14 @@ mounts and file-based credential injection are outside this initial chart.
 config:
   storage:
     fs:
-      root: /data/artifacts
+      root: /var/lib/python-index-proxy/artifacts
 persistence:
   enabled: true
   size: 20Gi
   accessModes: [ReadWriteOnce]
 ```
 
-The filesystem data volume is mounted at `persistence.mountPath` (default `/data`).
+The filesystem data volume is mounted at `persistence.mountPath` (default `/var/lib/python-index-proxy`).
 `fs.root` and any explicit `fs.atomic_write_dir` must be inside that mount. A
 persistent fs deployment defaults to `Recreate`, so upgrades have downtime but do
 not schedule overlapping old and new Pods against an RWO volume. Set
@@ -213,8 +208,3 @@ selection, index structures and required enabled-route settings. Templates also
 check cross-field constraints such as filesystem replicas and mount paths.
 Backend-specific semantics and URL/path validation remain the application's
 responsibility.
-
-Run `mise run chart-check` for local linting of the supplied storage and routing
-examples, or use `helm lint` / `helm template` with your own values. No cluster
-access is needed. These checks do not establish image availability, storage
-connectivity, or runtime behavior in your Kubernetes cluster.

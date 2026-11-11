@@ -19,7 +19,6 @@ and reverse-proxy routing for that path accordingly. Scrapes do not contribute t
 application HTTP metrics.
 The route has the same network access controls as the application's listener.
 
-The implementation uses the `metrics` facade and `metrics-exporter-prometheus`.
 Counters and gauges are cumulative/per-process; durations and sizes are classic
 histograms with explicit buckets, allowing aggregation across replicas. It does
 not emit client-calculated quantiles, summaries or native histograms. Duration
@@ -49,7 +48,7 @@ compilation is confined to `src/telemetry/mod.rs`.
 | `pipr_index_cache_capacity_bytes` | Gauge | none |
 | `pipr_index_cache_removals_total` | Counter | `cause` |
 
-`route` is the Axum route template, including the configured application prefix,
+`route` is the matched route template, including the configured application prefix,
 or `unmatched`. Arbitrary HTTP method tokens map to `OTHER`. Raw request paths,
 package names, filenames, hashes, URLs, request IDs and arbitrary error messages
 are never labels. Status is the numeric response status, or `none` if cancelled
@@ -78,7 +77,7 @@ of the delivery mode, not successful transfers. In particular, a redirect only
 confirms that a signed URL was returned; storage-side metrics are needed to measure
 the subsequent download.
 
-Cache entry count and weight are approximate Moka snapshots. Weight covers keys,
+Cache entry count and weight are approximate in-memory cache snapshots. Weight covers keys,
 rendered HTML/JSON and source mappings, excluding allocator overhead and in-flight
 work. Removal causes are `expired`, `explicit`, `replaced` and `size`; notification
 is asynchronous. These metrics do not inventory artifact storage or process RSS.

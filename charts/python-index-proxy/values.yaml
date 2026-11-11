@@ -49,8 +49,8 @@ envFrom: []
 persistence:
   enabled: false
   existingClaim: ""
-  mountPath: /data
-  size: 10Gi
+  mountPath: /var/lib/python-index-proxy
+  size: 20Gi
   # null uses the cluster default; "" requests no StorageClass.
   storageClass: null
   # With existingClaim, declare its actual access modes here too.

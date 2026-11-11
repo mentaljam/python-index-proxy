@@ -19,14 +19,15 @@ COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --target "$(cat /rust-target)" --recipe-path recipe.json --features "$CARGO_FEATURES"
 COPY . .
 RUN cargo build --release --locked --target "$(cat /rust-target)" --features "$CARGO_FEATURES" \
-    && mkdir /out \
+    && mkdir -p /out/data \
     && cp "target/$(cat /rust-target)/release/python-index-proxy" /out/python-index-proxy
 
 FROM scratch
 ENV PIPR__BIND=0.0.0.0:3000
 COPY docker/passwd /etc/
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-USER 65534
+COPY --from=builder --chown=65534:65534 /out/data/ /var/lib/python-index-proxy/
+USER 65534:65534
 WORKDIR /var/lib/python-index-proxy
 COPY --from=builder /out/python-index-proxy /bin/python-index-proxy
 ENTRYPOINT [ "/bin/python-index-proxy" ]
