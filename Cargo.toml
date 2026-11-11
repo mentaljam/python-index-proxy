@@ -22,7 +22,7 @@ html5gum = { version = "0.9.1", default-features = false }
 http = "*"
 humantime-serde = "^1.1"
 moka = { version = "^0.12", features = ["future"] }
-opendal = { version = "=0.59.5", default-features = false, features = ["executors-tokio", "http-transport-reqwest-rustls"] }
+opendal = { version = "=0.59.5", default-features = false, features = ["executors-tokio", "http-transport-reqwest"] }
 percent-encoding = "^2.3"
 reqwest = { version = "^0.13", features = [
     "charset",
