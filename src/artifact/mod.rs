@@ -1,10 +1,10 @@
 use std::{pin::Pin, time::Duration};
 
+use crate::package_name::PackageName;
 use bytes::Bytes;
 use futures::{Stream, TryStreamExt};
 use opendal::Operator;
 use tokio::sync::oneshot;
-use uv_normalize::PackageName;
 
 use crate::{
     paths::{artifact_path, valid_filename},
@@ -26,7 +26,7 @@ impl State {
         if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Ok(File::None);
         }
-        let Ok(package) = PackageName::from_owned(package) else {
+        let Ok(package) = package.parse::<PackageName>() else {
             return Ok(File::None);
         };
         if !valid_filename(&file) || !self.0.indices.contains_key(&index) {

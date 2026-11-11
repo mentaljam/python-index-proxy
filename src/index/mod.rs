@@ -6,10 +6,10 @@ use std::{
     },
 };
 
+use crate::package_name::PackageName;
 use bytes::Bytes;
 use tokio::sync::Mutex;
 use url::Url;
-use uv_normalize::PackageName;
 
 use crate::{
     coordination::ResourceLimit,

@@ -72,7 +72,6 @@ tower-http = { version = "^0.7", features = [
 tracing = "^0.1"
 tracing-subscriber = { version = "^0.3", features = ["env-filter", "json"] }
 url = "^2.5"
-uv-normalize = "0.0.99"
 
 [dev-dependencies]
 toml = "^1.2"

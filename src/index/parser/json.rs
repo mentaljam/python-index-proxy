@@ -17,7 +17,7 @@ pub(super) fn parse(
             && minor.bytes().all(|byte| byte.is_ascii_digit())),
         "Unsupported upstream Simple API version"
     );
-    let normalized = detail.name.parse::<uv_normalize::PackageName>()?;
+    let normalized = detail.name.parse::<crate::package_name::PackageName>()?;
     anyhow::ensure!(
         normalized.as_str() == package,
         "Upstream project name mismatch"

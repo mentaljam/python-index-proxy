@@ -13,6 +13,7 @@ mod http;
 mod index;
 mod logging;
 mod models;
+mod package_name;
 mod paths;
 mod settings;
 mod shutdown;
