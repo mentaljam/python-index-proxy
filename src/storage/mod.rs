@@ -1,6 +1,10 @@
 use opendal::{Builder, Operator, services};
 use serde::{Deserialize, Serialize};
 
+use crate::settings::StorageHttp;
+
+mod http;
+
 // Use each backend's native configuration so TOML values retain their types.
 macro_rules! storage_backends {
     ($(($feature:literal, $name:literal, $variant:ident)),* $(,)?) => {
@@ -16,7 +20,7 @@ macro_rules! storage_backends {
         }
 
         impl Storage {
-            pub fn operator(self) -> anyhow::Result<Operator> {
+            pub fn operator(self, http: StorageHttp) -> anyhow::Result<Operator> {
                 let op = match self {
                     Self::Fs(mut config) => {
                         if config.atomic_write_dir.is_none() {
@@ -38,7 +42,9 @@ macro_rules! storage_backends {
                     capabilities.read && capabilities.write && capabilities.stat,
                     "artifact storage must support read, write, and stat"
                 );
-                Ok(op)
+                let transport = http::transport(http)?;
+                let context = op.base_context().with_http_transport(transport);
+                Ok(op.with_context(context))
             }
         }
     };

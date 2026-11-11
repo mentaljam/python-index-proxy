@@ -35,6 +35,7 @@ impl TryFrom<Settings> for State {
             storage,
             limits,
             upstream,
+            storage_http,
             ..
         } = settings;
 
@@ -55,7 +56,7 @@ impl TryFrom<Settings> for State {
             .map(|(slug, urls)| (slug, urls.into_iter().map(IndexUrlTemplate).collect()))
             .collect();
 
-        let storage = storage.operator()?;
+        let storage = storage.operator(storage_http)?;
 
         let data = StateData {
             shutdown: Shutdown::default(),

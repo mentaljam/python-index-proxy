@@ -6205,6 +6205,7 @@ dependencies = [
  "humantime-serde",
  "moka",
  "opendal",
+ "opendal-http-transport-reqwest",
  "percent-encoding",
  "reqwest",
  "rustls 0.23.46",

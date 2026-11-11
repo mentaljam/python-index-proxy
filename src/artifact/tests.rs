@@ -548,7 +548,9 @@ async fn filesystem_cache_hit_streams_exact_bytes_without_database_mapping() {
     ));
     let mut config = opendal::services::FsConfig::default();
     config.root = Some(root.to_str().unwrap().into());
-    let storage = crate::storage::Storage::Fs(config).operator().unwrap();
+    let storage = crate::storage::Storage::Fs(config)
+        .operator(crate::settings::StorageHttp::default())
+        .unwrap();
     let path = "default/package/ab/cd/identifier/package%2Ewhl";
     let mut writer = storage
         .writer_with(path)
@@ -581,7 +583,9 @@ async fn s3_cache_hit_presigns_existing_object_path() {
     let storage: crate::storage::Storage = toml::from_str(
         "[s3]\nbucket = 'packages'\nregion = 'us-east-1'\nendpoint = 'https://objects.example.test'\naccess_key_id = 'test-key'\nsecret_access_key = 'test-secret'\ndisable_config_load = true\ndisable_ec2_metadata = true\n"
     ).unwrap();
-    let storage = storage.operator().unwrap();
+    let storage = storage
+        .operator(crate::settings::StorageHttp::default())
+        .unwrap();
     let File::PresignedUrl(url) = cached_file(&storage, "ab/cd/package.whl").await.unwrap() else {
         panic!("S3 cache hits must redirect when signature needs no extra headers")
     };

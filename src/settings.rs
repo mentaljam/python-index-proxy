@@ -56,11 +56,18 @@ pub struct Settings {
     #[serde(default)]
     pub limits: Limits,
 
-    /// Upstream HTTP timeouts; storage operations use their backend settings.
+    /// HTTP timeouts for index sources and upstream artifact downloads.
+    /// Storage HTTP requests use storage_http instead.
     /// Artifact downloads have no total deadline while upstream data continues to arrive.
     #[cfg_attr(feature = "config-template", toml_example(nesting))]
     #[serde(default)]
     pub upstream: Upstream,
+
+    /// HTTP timeouts for artifact storage and its credential providers.
+    /// Filesystem operations and non-HTTP backend protocols are not covered.
+    #[cfg_attr(feature = "config-template", toml_example(nesting))]
+    #[serde(default)]
+    pub storage_http: StorageHttp,
 
     /// Exactly one backend is required; available backends depend on the build's storage features.
     /// Select one OpenDAL backend using its native configuration.
@@ -97,6 +104,7 @@ impl Settings {
             index_cache: Cache::default(),
             limits: Limits::default(),
             upstream: Upstream::default(),
+            storage_http: StorageHttp::default(),
             storage: crate::storage::Storage::filesystem_template(),
         }
     }
@@ -237,6 +245,45 @@ impl Default for Upstream {
             response_header_timeout: Duration::from_secs(30),
             read_timeout: Duration::from_secs(30),
             index_download_timeout: Duration::from_secs(60),
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone, Copy, Debug)]
+#[cfg_attr(feature = "config-template", derive(toml_example::TomlExample))]
+#[serde(default)]
+pub struct StorageHttp {
+    /// Deadline for establishing a storage HTTP connection, including TLS.
+    #[cfg_attr(feature = "config-template", toml_example(default = "5s"))]
+    #[serde(
+        serialize_with = "humantime_serde::serialize",
+        deserialize_with = "de::timeout"
+    )]
+    pub connect_timeout: Duration,
+    /// Deadline until storage response headers arrive, including sending the
+    /// buffered request body and redirects; excludes reading the response body.
+    #[cfg_attr(feature = "config-template", toml_example(default = "30s"))]
+    #[serde(
+        serialize_with = "humantime_serde::serialize",
+        deserialize_with = "de::timeout"
+    )]
+    pub response_header_timeout: Duration,
+    /// Deadline for each active read of storage HTTP response data. Waiting for
+    /// the package client does not count; there is no whole-file deadline.
+    #[cfg_attr(feature = "config-template", toml_example(default = "30s"))]
+    #[serde(
+        serialize_with = "humantime_serde::serialize",
+        deserialize_with = "de::timeout"
+    )]
+    pub read_timeout: Duration,
+}
+
+impl Default for StorageHttp {
+    fn default() -> Self {
+        Self {
+            connect_timeout: Duration::from_secs(5),
+            response_header_timeout: Duration::from_secs(30),
+            read_timeout: Duration::from_secs(30),
         }
     }
 }
@@ -462,6 +509,48 @@ mod tests {
             Duration::from_secs(60)
         );
         assert!(settings.public_url.is_none());
+    }
+
+    #[test]
+    fn storage_http_defaults_and_overrides_are_independent_of_upstream() {
+        let defaults = parse_settings("[storage.fs]\nroot = 'artifacts'").unwrap();
+        assert_eq!(
+            defaults.storage_http.connect_timeout,
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            defaults.storage_http.response_header_timeout,
+            Duration::from_secs(30)
+        );
+        assert_eq!(defaults.storage_http.read_timeout, Duration::from_secs(30));
+        let overridden = parse_settings(
+            "[storage.fs]\nroot = 'artifacts'\n[storage_http]\nread_timeout = '125ms'\n[upstream]\nconnect_timeout = '2s'",
+        ).unwrap();
+        assert_eq!(
+            overridden.storage_http.read_timeout,
+            Duration::from_millis(125)
+        );
+        assert_eq!(
+            overridden.storage_http.connect_timeout,
+            Duration::from_secs(5)
+        );
+        assert_eq!(overridden.upstream.connect_timeout, Duration::from_secs(2));
+        assert_eq!(overridden.upstream.read_timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn storage_http_rejects_invalid_deadlines_with_field_context() {
+        for field in ["connect_timeout", "response_header_timeout", "read_timeout"] {
+            for value in ["0s", "-1s", "not-a-duration", "18446744073709551615s"] {
+                let source = format!(
+                    "[storage.fs]\nroot = 'artifacts'\n[storage_http]\n{field} = '{value}'"
+                );
+                let error = parse_settings(&source)
+                    .err()
+                    .expect("invalid storage timeout");
+                assert!(error.to_string().contains(field), "{error}");
+            }
+        }
     }
 
     #[test]
