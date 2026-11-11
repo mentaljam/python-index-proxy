@@ -38,7 +38,13 @@ pub(crate) async fn index_page(
 ) -> anyhow::Result<Option<(Url, Bytes)>> {
     tokio::time::timeout(settings.index_download_timeout, async {
         let mut response = send(client, url, settings).await?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
+        let status = response.status();
+        if status.is_client_error()
+            && !matches!(
+                status,
+                reqwest::StatusCode::REQUEST_TIMEOUT | reqwest::StatusCode::TOO_MANY_REQUESTS
+            )
+        {
             return Ok(None);
         }
         anyhow::ensure!(

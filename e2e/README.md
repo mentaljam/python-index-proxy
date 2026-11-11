@@ -128,9 +128,12 @@ Both tools target the project's minimum Python version, 3.12.
 - Two proxy processes use separate homes/logs and one shared filesystem artifact
   root. The second process reconstructs a link from the first, and the first
   then reads the completed shared object while upstream is unavailable.
-- Multiple sources skip 404 projects in either order. Any source's 503 causes
-  HTTP 502 for page and cold artifact recovery routes, even with a healthy peer.
-  After recovery the complete candidate set and both artifact bodies are returned.
+- Multiple sources skip 4xx responses except 408 and 429. The process tests cover
+  403/404/410 in either order, caching the successful merge and recovering cold
+  artifacts after restart. If every source is skipped, the proxy returns HTTP 404.
+  Any source's 408, 429 or 503 causes HTTP 502 for page and cold artifact recovery
+  routes, even with a healthy peer; partial pages are not cached. After recovery
+  the complete candidate set and both artifact bodies are returned.
 - Invalid configuration fails before binding its port, with field-specific
   diagnostics that do not echo source credentials. Nested/percent-encoded path
   prefixes work, including HTML escaping for ampersands.
@@ -190,7 +193,8 @@ mapping IDs, internal lock ordering, or writer-close injection.
 Rust cold-replica regression: cold source reconstruction, cross-replica ready-file
 access, and HTTP context validation. Rust retains separate tests for an explicitly
 injected stale cache page and for a page too large for its configured byte budget.
-The mixed-source 404/success and success/503 HTTP cases also moved to process e2e.
+The mixed-source skipped-client-error/success and success/upstream-failure HTTP
+cases also live in process e2e.
 Rust retains the broader single-status/body/connection error matrix and direct
 assertions that a failed merge leaves no cache entry and recovery populates it.
 These tests call the running binary through public URLs; they do not expose Rust

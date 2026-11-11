@@ -110,18 +110,24 @@ def test_two_processes_recover_sources_and_share_ready_artifacts(
     assert upstream.journal() == before
 
 
-@pytest.mark.parametrize("missing_first", [True, False], ids=["404-first", "404-last"])
-def test_multiple_upstreams_skip_missing_projects(
+@pytest.mark.parametrize("skipped_status", [403, 404, 410])
+@pytest.mark.parametrize(
+    "skipped_first", [True, False], ids=["skipped-first", "skipped-last"]
+)
+def test_multiple_upstreams_skip_client_errors_and_recover_cold_artifacts(
     proxy_factory: ProxyFactory,
     upstream: Upstream,
     second_upstream: Upstream,
     *,
-    missing_first: bool,
+    skipped_status: int,
+    skipped_first: bool,
 ) -> None:
     wheel = make_wheel("pipr-e2e-multi", "1.0.0", "VALUE = 'available'\n")
     upstream.publish(wheel)
+    page_path = f"/simple/{wheel.name}/"
+    second_upstream.reply(page_path, Reply(skipped_status))
     sources = (upstream, second_upstream)
-    if missing_first:
+    if skipped_first:
         sources = sources[::-1]
     proxy = proxy_factory(
         index_templates=tuple(source.url + "/simple/{package}/" for source in sources)
@@ -129,17 +135,43 @@ def test_multiple_upstreams_skip_missing_projects(
     candidates = links(proxy, wheel.name)
     assert len(candidates) == 1
     assert unquote(urlsplit(candidates[0]).path).endswith("/" + wheel.filename)
+    assert links(proxy, wheel.name) == candidates
+    assert upstream.journal().count(page_path) == 1
+    assert second_upstream.journal() == [page_path]
+    proxy.restart()
     assert proxy.get(candidates[0]) == wheel.content
-    assert upstream.journal().count(f"/simple/{wheel.name}/") == 1
-    assert second_upstream.journal() == [f"/simple/{wheel.name}/"]
+    assert upstream.journal().count(page_path) == 2
+    assert second_upstream.journal() == [page_path, page_path]
 
 
-@pytest.mark.parametrize("failed_first", [True, False], ids=["503-first", "503-last"])
+def test_multiple_upstreams_return_404_when_all_client_errors_are_skipped(
+    proxy_factory: ProxyFactory, upstream: Upstream, second_upstream: Upstream
+) -> None:
+    page_path = "/simple/missing/"
+    upstream.reply(page_path, Reply(403))
+    second_upstream.reply(page_path, Reply(410))
+    proxy = proxy_factory(
+        index_templates=tuple(
+            source.url + "/simple/{package}/" for source in (upstream, second_upstream)
+        )
+    )
+    with pytest.raises(HTTPError) as error:
+        proxy.get(proxy.index_url + "missing/")
+    assert error.value.code == 404
+    assert upstream.journal() == [page_path]
+    assert second_upstream.journal() == [page_path]
+
+
+@pytest.mark.parametrize("failed_status", [408, 429, 503])
+@pytest.mark.parametrize(
+    "failed_first", [True, False], ids=["failed-first", "failed-last"]
+)
 def test_multiple_upstreams_fail_closed_then_recover_full_index(
     proxy_factory: ProxyFactory,
     upstream: Upstream,
     second_upstream: Upstream,
     *,
+    failed_status: int,
     failed_first: bool,
 ) -> None:
     first = make_wheel("pipr-e2e-multi", "1.0.0", "VALUE = 'first'\n")
@@ -162,7 +194,7 @@ def test_multiple_upstreams_fail_closed_then_recover_full_index(
     )
     assert not upstream.artifact_requests()
     assert not second_upstream.artifact_requests()
-    second_upstream.reply(page_path, Reply(503, b"temporarily unavailable"))
+    second_upstream.reply(page_path, Reply(failed_status, b"temporarily unavailable"))
     proxy.restart()
     with pytest.raises(HTTPError) as error:
         proxy.get(proxy.index_url + first.name + "/")

@@ -304,7 +304,11 @@ async fn upstream_index_failures_return_bad_gateway_without_caching_partial_page
         let cases = [
             (vec!["404"], StatusCode::NOT_FOUND),
             (vec!["404", "404"], StatusCode::NOT_FOUND),
-            (vec!["403"], StatusCode::BAD_GATEWAY),
+            (vec!["400"], StatusCode::NOT_FOUND),
+            (vec!["401"], StatusCode::NOT_FOUND),
+            (vec!["403"], StatusCode::NOT_FOUND),
+            (vec!["499"], StatusCode::NOT_FOUND),
+            (vec!["408"], StatusCode::BAD_GATEWAY),
             (vec!["429"], StatusCode::BAD_GATEWAY),
             (vec!["500"], StatusCode::BAD_GATEWAY),
             (vec!["503"], StatusCode::BAD_GATEWAY),

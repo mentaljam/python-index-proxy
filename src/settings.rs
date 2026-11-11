@@ -38,7 +38,7 @@ pub struct Settings {
 
     /// Case-sensitive ASCII index names (letters/digits, internal '.', '_' and '-') map to HTTP(S) sources.
     /// Templates need exactly one {package} in the path; query strings and URL credentials are preserved.
-    /// Sources merge without priority: 404 is skipped, other upstream failures return 502 without caching partial results.
+    /// Sources merge without priority: 4xx except 408/429 are skipped; other upstream failures return 502 without caching partial results.
     #[serde(default = "defaults::indices", deserialize_with = "de::indices")]
     #[cfg_attr(feature = "config-template", toml_example(default = { default = ["https://pypi.org/simple/{package}/"] }))]
     pub indices: HashMap<String, Vec<String>>,
