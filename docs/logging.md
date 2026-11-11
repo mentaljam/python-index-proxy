@@ -3,7 +3,7 @@
 The proxy writes application logs to stdout, for interactive use, service managers
 such as systemd, and container log collectors. It does not send logs over the
 network. `log_format = "text"` is the default; `log_format = "json"` emits one
-JSON object per line. `PIPR_LOG_FORMAT` overrides the file setting. Filtering uses
+JSON object per line. `PIPR__LOG_FORMAT` overrides the file setting. Filtering uses
 `RUST_LOG`, with INFO as the default.
 
 ## HTTP requests

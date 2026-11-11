@@ -91,9 +91,21 @@ impl Settings {
             None => File::with_name("python_index_proxy").required(false),
         };
 
+        Self::from_sources(file, Environment::default())
+    }
+
+    fn from_sources(
+        file: impl config::Source + Send + Sync + 'static,
+        environment: Environment,
+    ) -> Result<Self, ConfigError> {
         Config::builder()
             .add_source(file)
-            .add_source(Environment::with_prefix("pipr"))
+            .add_source(
+                environment
+                    .prefix("pipr")
+                    .prefix_separator("__")
+                    .separator("__"),
+            )
             .build()?
             .try_deserialize()
     }
@@ -551,6 +563,89 @@ mod tests {
             .add_source(File::from_str(source, config::FileFormat::Toml))
             .build()?
             .try_deserialize()
+    }
+
+    #[test]
+    fn environment_overrides_top_level_fields_with_double_underscore_prefix() {
+        let settings = Settings::from_sources(
+            File::from_str(
+                "bind = '127.0.0.1:3000'\nlog_format = 'text'\n[storage.fs]\nroot = 'artifacts'",
+                config::FileFormat::Toml,
+            ),
+            Environment::default().source(Some(
+                [
+                    ("PIPR__BIND".into(), "0.0.0.0:8080".into()),
+                    ("PIPR__LOG_FORMAT".into(), "json".into()),
+                    ("OTHER_BIND".into(), "invalid-address".into()),
+                ]
+                .into(),
+            )),
+        )
+        .unwrap();
+
+        assert_eq!(settings.bind, "0.0.0.0:8080".parse::<SocketAddr>().unwrap());
+        assert!(matches!(settings.log_format, LogFormat::Json));
+        let Storage::Fs(storage) = settings.storage else {
+            panic!("expected filesystem storage");
+        };
+        assert_eq!(storage.root.as_deref(), Some("artifacts"));
+    }
+
+    #[test]
+    fn environment_overrides_nested_fields_without_splitting_single_underscores() {
+        let settings = Settings::from_sources(
+            File::from_str(
+                "[storage.fs]\nroot = 'artifacts'\n[limits]\nmax_index_refreshes = 2\n[storage_http]\nread_timeout = '30s'",
+                config::FileFormat::Toml,
+            ),
+            Environment::default().source(Some(
+                [
+                    ("PIPR__STORAGE__FS__ROOT".into(), "/data/artifacts".into()),
+                    ("PIPR__LIMITS__MAX_INDEX_REFRESHES".into(), "7".into()),
+                    ("PIPR__STORAGE_HTTP__READ_TIMEOUT".into(), "250ms".into()),
+                ]
+                .into(),
+            )),
+        )
+        .unwrap();
+
+        let Storage::Fs(storage) = settings.storage else {
+            panic!("expected filesystem storage");
+        };
+        assert_eq!(storage.root.as_deref(), Some("/data/artifacts"));
+        assert_eq!(settings.limits.max_index_refreshes, 7);
+        assert_eq!(
+            settings.storage_http.read_timeout,
+            Duration::from_millis(250)
+        );
+    }
+
+    #[cfg(feature = "storage-s3")]
+    #[test]
+    fn environment_overrides_storage_credentials_and_boolean_fields() {
+        let settings = Settings::from_sources(
+            File::from_str(
+                "[storage.s3]\nbucket = 'packages'\naccess_key_id = 'file-key'\ndisable_ec2_metadata = false",
+                config::FileFormat::Toml,
+            ),
+            Environment::default().source(Some(
+                [
+                    ("PIPR__STORAGE__S3__ACCESS_KEY_ID".into(), "000123".into()),
+                    ("PIPR__STORAGE__S3__SECRET_ACCESS_KEY".into(), "true".into()),
+                    ("PIPR__STORAGE__S3__DISABLE_EC2_METADATA".into(), "true".into()),
+                ]
+                .into(),
+            )),
+        )
+        .unwrap();
+
+        let Storage::S3(storage) = settings.storage else {
+            panic!("expected S3 storage");
+        };
+        assert_eq!(storage.bucket, "packages");
+        assert_eq!(storage.access_key_id.as_deref(), Some("000123"));
+        assert_eq!(storage.secret_access_key.as_deref(), Some("true"));
+        assert!(storage.disable_ec2_metadata);
     }
 
     #[test]

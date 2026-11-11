@@ -15,7 +15,7 @@ COPY . .
 RUN cargo build --release --locked --target x86_64-unknown-linux-musl --features "$CARGO_FEATURES"
 
 FROM scratch
-ENV PIPR_BIND=0.0.0.0:3000
+ENV PIPR__BIND=0.0.0.0:3000
 COPY docker/passwd /etc/
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 USER 65534
