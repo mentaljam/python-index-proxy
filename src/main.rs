@@ -21,6 +21,12 @@ mod test_support;
 
 #[tokio::main]
 async fn main() {
+    #[cfg(feature = "config-template")]
+    if std::env::args().any(|a| &a == "--print-settings-template") {
+        print!("{}", Settings::template());
+        return;
+    }
+
     opendal::install_default();
     // Install an explicit provider for the HTTP clients.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -29,23 +35,10 @@ async fn main() {
         .with(
             EnvFilter::builder()
                 .with_default_directive(LevelFilter::INFO.into())
-                .from_env_lossy()
+                .from_env_lossy(),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
-
-    if std::env::args().any(|a| &a == "--print-settings-template") {
-        #[cfg(feature = "config-template")]
-        {
-            print!("{}", Settings::template());
-            return;
-        }
-        #[cfg(not(feature = "config-template"))]
-        {
-            tracing::error!("--print-settings-template requires the config-template feature");
-            std::process::exit(1);
-        }
-    }
 
     shutdown::exit(serve().await);
 }
