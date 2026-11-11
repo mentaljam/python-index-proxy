@@ -1,6 +1,6 @@
-FROM clux/muslrust:stable AS chef
+FROM clux/muslrust:stable@sha256:12e02bbe193e3bd9255f9b5a9312f0039a0c79b9e015cf5e81eeab83a1eb8e0f AS chef
 USER root
-RUN cargo install cargo-chef
+RUN cargo install cargo-chef --version '=0.1.78' --locked
 WORKDIR /app
 
 FROM chef AS planner
