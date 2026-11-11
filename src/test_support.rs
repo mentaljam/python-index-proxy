@@ -13,7 +13,7 @@ pub(crate) fn index_failure_state(sources: Vec<String>) -> (State, std::path::Pa
             .unwrap()
             .as_nanos(),
     ));
-    let mut settings = Settings::template();
+    let mut settings = Settings::for_test();
     settings.indices = [("default".into(), sources)].into();
     let mut config = opendal::services::FsConfig::default();
     config.root = Some(root.to_str().unwrap().into());

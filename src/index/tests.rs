@@ -180,7 +180,7 @@ async fn slow_index_fetch_does_not_block_unrelated_requests() {
                 .as_nanos(),
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let mut settings = Settings::template();
+        let mut settings = Settings::for_test();
         settings.indices = [("default".into(), vec![format!("{endpoint}/{{package}}/")])].into();
         let mut config = opendal::services::FsConfig::default();
         config.root = Some(root.join("artifacts").to_str().unwrap().into());
@@ -249,7 +249,7 @@ async fn index_cache_capacity_counts_key_and_payload_bytes() {
             .as_nanos(),
     ));
     std::fs::create_dir_all(&root).unwrap();
-    let mut settings = Settings::template();
+    let mut settings = Settings::for_test();
     settings.index_cache = toml::from_str("max_capacity = '12 B'").unwrap();
     let mut config = opendal::services::FsConfig::default();
     config.root = Some(root.join("artifacts").to_str().unwrap().into());

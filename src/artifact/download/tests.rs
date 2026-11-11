@@ -46,7 +46,7 @@ async fn cancellation_fixture(
             .unwrap()
             .as_nanos()
     ));
-    let mut settings = Settings::template();
+    let mut settings = Settings::for_test();
     let mut config = opendal::services::FsConfig::default();
     config.root = Some(root.to_str().unwrap().into());
     settings.storage = crate::storage::Storage::Fs(config);

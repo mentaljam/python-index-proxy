@@ -269,7 +269,7 @@ async fn get_file_rejects_malformed_identifiers_before_storage_lookup() {
             .as_nanos(),
     ));
     std::fs::create_dir_all(&root).unwrap();
-    let mut settings = Settings::template();
+    let mut settings = Settings::for_test();
     let mut config = opendal::services::FsConfig::default();
     config.root = Some(root.join("artifacts").to_str().unwrap().into());
     settings.storage = crate::storage::Storage::Fs(config);
@@ -373,7 +373,7 @@ async fn failed_download_fixture(
             .as_nanos(),
     ));
     std::fs::create_dir_all(&root).unwrap();
-    let mut settings = Settings::template();
+    let mut settings = Settings::for_test();
     let mut config = opendal::services::FsConfig::default();
     config.root = Some(root.join("artifacts").to_str().unwrap().into());
     settings.storage = crate::storage::Storage::Fs(config);
@@ -491,7 +491,7 @@ async fn waiting_download_allows_active_download_to_finish() {
             .as_nanos()
     ));
     std::fs::create_dir_all(&root).unwrap();
-    let mut settings = Settings::template();
+    let mut settings = Settings::for_test();
     let mut config = opendal::services::FsConfig::default();
     config.root = Some(root.join("artifacts").to_str().unwrap().into());
     settings.storage = crate::storage::Storage::Fs(config);

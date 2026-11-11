@@ -3,30 +3,69 @@ use std::{collections::HashMap, net::SocketAddr, time::Duration};
 use config::{Config, ConfigError, Environment, File};
 use serde::{Deserialize, Serialize};
 
+use crate::storage::Storage;
+
 #[derive(Deserialize, Serialize)]
+#[cfg_attr(feature = "config-template", derive(toml_example::TomlExample))]
 pub struct Settings {
+    /// HTTP listen address, including the port; IPv6 addresses use [address]:port.
+    /// This address is also used in generated links when public_url is omitted.
     #[serde(default = "defaults::bind")]
+    #[cfg_attr(feature = "config-template", toml_example(default = "127.0.0.1:3000"))]
     pub bind: SocketAddr,
+
+    /// Application route prefix, starting with '/'; a trailing slash is added if absent.
+    /// Use a URI path without a host, query, fragment, dot segments or routing captures.
     #[serde(
         default = "defaults::path_prefix",
         deserialize_with = "de::path_prefix"
     )]
     pub path_prefix: String,
+
+    /// External HTTP(S) base URL for links and commands, without credentials, query or fragment.
+    /// A trailing slash is added; its path may differ from path_prefix for reverse-proxy rewrites.
+    /// When omitted, uses http://{bind}{path_prefix}, preserving the configured bind address.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "de::public_url"
     )]
+    #[cfg_attr(
+        feature = "config-template",
+        toml_example(default = "https://example.com")
+    )]
     pub public_url: Option<String>,
+
+    /// Case-sensitive ASCII index names (letters/digits, internal '.', '_' and '-') map to HTTP(S) sources.
+    /// Templates need exactly one {package} in the path; query strings and URL credentials are preserved.
+    /// Sources merge without priority: 404 is skipped, other upstream failures return 502 without caching partial results.
     #[serde(default = "defaults::indices", deserialize_with = "de::indices")]
+    #[cfg_attr(feature = "config-template", toml_example(default = { default = ["https://pypi.org/simple/{package}/"] }))]
     pub indices: HashMap<String, Vec<String>>,
+
+    /// In-memory cache of project pages and source mappings, separate for each replica.
+    /// Entries are lost on restart; this cache does not store artifact bytes.
+    #[cfg_attr(feature = "config-template", toml_example(nesting))]
     #[serde(default)]
     pub index_cache: Cache,
+
+    /// Concurrent-work limits apply separately to each replica.
+    /// Requests for the same in-flight object share its work instead of consuming extra slots.
+    /// New independent work beyond these limits receives 503 with Retry-After: 1.
+    #[cfg_attr(feature = "config-template", toml_example(nesting))]
     #[serde(default)]
     pub limits: Limits,
+
+    /// Upstream HTTP timeouts; storage operations use their backend settings.
+    /// Artifact downloads have no total deadline while upstream data continues to arrive.
+    #[cfg_attr(feature = "config-template", toml_example(nesting))]
     #[serde(default)]
     pub upstream: Upstream,
-    pub storage: crate::storage::Storage,
+
+    /// Exactly one backend is required; available backends depend on the build's storage features.
+    /// Select one OpenDAL backend using its native configuration.
+    #[cfg_attr(feature = "config-template", toml_example(nesting))]
+    pub storage: Storage,
 }
 
 impl Settings {
@@ -43,7 +82,13 @@ impl Settings {
             .try_deserialize()
     }
 
-    pub fn template() -> Self {
+    #[cfg(feature = "config-template")]
+    pub fn template() -> String {
+        <Self as toml_example::TomlExample>::toml_example()
+    }
+
+    #[cfg(test)]
+    pub fn for_test() -> Self {
         Self {
             bind: defaults::bind(),
             path_prefix: defaults::path_prefix(),
@@ -58,9 +103,16 @@ impl Settings {
 }
 
 #[derive(Deserialize, Serialize, Default)]
+#[cfg_attr(feature = "config-template", derive(toml_example::TomlExample))]
 #[serde(default)]
 pub struct Cache {
+    /// Maximum cache lifetime after insertion or replacement; reads do not extend it.
+    /// Expired pages are fetched again on demand.
+    #[cfg_attr(feature = "config-template", toml_example(default = "1h"))]
     pub ttl: CacheTtl,
+    /// Per-replica byte budget for cache keys, rendered HTML and source mappings.
+    /// Excludes allocator overhead and in-flight work; this is not a process memory limit.
+    #[cfg_attr(feature = "config-template", toml_example(default = "128 MiB"))]
     pub max_capacity: MaxCacheCapacity,
 }
 
@@ -109,15 +161,23 @@ impl From<MaxCacheCapacity> for u64 {
 }
 
 #[derive(Deserialize, Serialize, Clone)]
+#[cfg_attr(feature = "config-template", derive(toml_example::TomlExample))]
 #[serde(default)]
 pub struct Limits {
+    /// Maximum body size of each upstream project page after decompression.
+    /// Exceeding it returns 502 without caching a partial page.
+    #[cfg_attr(feature = "config-template", toml_example(default = "32 MiB"))]
     #[serde(
         serialize_with = "byte_unit_serde::serialize",
         deserialize_with = "de::page_size"
     )]
     pub max_index_page_size: u64,
+    /// Concurrent project refreshes across distinct index/package pairs.
+    /// A slot covers fetching all configured sources and parsing their pages.
     #[serde(deserialize_with = "de::concurrency")]
     pub max_index_refreshes: usize,
+    /// Concurrent artifact cache fills across distinct objects; cache hits do not consume slots.
+    /// A fill retains its slot through completion or cleanup after failure/cancellation.
     #[serde(deserialize_with = "de::concurrency")]
     pub max_artifact_downloads: usize,
 }
@@ -133,23 +193,36 @@ impl Default for Limits {
 }
 
 #[derive(Deserialize, Serialize, Clone, Copy)]
+#[cfg_attr(feature = "config-template", derive(toml_example::TomlExample))]
 #[serde(default)]
 pub struct Upstream {
+    /// Deadline for establishing an upstream connection, including TLS negotiation.
+    /// Applies to both project-page requests and artifact downloads.
+    #[cfg_attr(feature = "config-template", toml_example(default = "5s"))]
     #[serde(
         serialize_with = "humantime_serde::serialize",
         deserialize_with = "de::timeout"
     )]
     pub connect_timeout: Duration,
+    /// Deadline from starting an upstream request until its response headers arrive.
+    /// Includes connection establishment and redirects, but excludes reading the response body.
+    #[cfg_attr(feature = "config-template", toml_example(default = "30s"))]
     #[serde(
         serialize_with = "humantime_serde::serialize",
         deserialize_with = "de::timeout"
     )]
     pub response_header_timeout: Duration,
+    /// Deadline for each active read of upstream response data.
+    /// Time spent writing to storage or waiting for the client does not count.
+    #[cfg_attr(feature = "config-template", toml_example(default = "30s"))]
     #[serde(
         serialize_with = "humantime_serde::serialize",
         deserialize_with = "de::timeout"
     )]
     pub read_timeout: Duration,
+    /// Total project-page download deadline per source, from request start through the full body.
+    /// Includes connection, headers and body reads; excludes parsing and does not limit artifact downloads.
+    #[cfg_attr(feature = "config-template", toml_example(default = "60s"))]
     #[serde(
         serialize_with = "humantime_serde::serialize",
         deserialize_with = "de::timeout"
@@ -477,9 +550,28 @@ mod tests {
 
     #[test]
     fn serialized_template_deserializes_with_the_same_defaults() {
-        let serialized = toml::to_string(&Settings::template()).unwrap();
+        let serialized = toml::to_string(&Settings::for_test()).unwrap();
         let parsed = parse_settings(&serialized).unwrap();
         assert_eq!(toml::to_string(&parsed).unwrap(), serialized);
+    }
+
+    #[cfg(feature = "config-template")]
+    #[test]
+    fn documented_template_preserves_defaults_and_illustrates_optional_public_url() {
+        let text = Settings::template();
+        assert!(text.contains(
+            "# Select one OpenDAL backend using its native configuration.\n[storage.fs]\nroot = \"artifacts\"\natomic_write_dir = \"artifacts/.tmp\"\n"
+        ));
+        assert!(!text.contains("storage ="));
+        let parsed = parse_settings(&text).unwrap();
+        assert_eq!(
+            toml::to_string(&parsed).unwrap(),
+            toml::to_string(&Settings::for_test()).unwrap()
+        );
+        assert!(text.contains("# public_url = \"https://example.com\""));
+        let enabled = text.replace("# public_url =", "public_url =");
+        let parsed = parse_settings(&enabled).unwrap();
+        assert_eq!(parsed.public_url.as_deref(), Some("https://example.com/"));
     }
 
     #[test]

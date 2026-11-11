@@ -112,11 +112,32 @@ storage_backends! {
 }
 
 impl Storage {
+    #[cfg(test)]
     pub fn filesystem_template() -> Self {
         let mut config = services::FsConfig::default();
         config.root = Some("artifacts".into());
         config.atomic_write_dir = Some("artifacts/.tmp".into());
         Self::Fs(config)
+    }
+}
+
+#[cfg(feature = "config-template")]
+impl toml_example::TomlExample for Storage {
+    fn toml_example() -> String {
+        Self::toml_example_with_prefix("", ("[", "]"), "")
+    }
+
+    fn toml_example_with_prefix(label: &str, label_format: (&str, &str), prefix: &str) -> String {
+        let section = if label.is_empty() {
+            "fs".to_owned()
+        } else {
+            format!("{label}.fs")
+        };
+        format!(
+            "{prefix}{}{section}{}\n{prefix}root = \"artifacts\"\n{prefix}atomic_write_dir = \"artifacts/.tmp\"\n",
+            label_format.0,
+            label_format.1.trim_end_matches('\n')
+        )
     }
 }
 
@@ -155,7 +176,7 @@ mod tests {
 
     #[test]
     fn explicit_filesystem_template_roundtrips() {
-        let text = toml::to_string(&crate::settings::Settings::template()).unwrap();
+        let text = toml::to_string(&crate::settings::Settings::for_test()).unwrap();
         let decoded: crate::settings::Settings = toml::from_str(&text).unwrap();
         assert!(matches!(decoded.storage, Storage::Fs(_)));
     }

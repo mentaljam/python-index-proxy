@@ -32,9 +32,16 @@ async fn main() {
         .init();
 
     if std::env::args().any(|a| &a == "--print-settings-template") {
-        let template = toml::to_string_pretty(&Settings::template()).unwrap();
-        print!("{template}");
-        std::process::exit(0)
+        #[cfg(feature = "config-template")]
+        {
+            print!("{}", Settings::template());
+            return;
+        }
+        #[cfg(not(feature = "config-template"))]
+        {
+            tracing::error!("--print-settings-template requires the config-template feature");
+            std::process::exit(1);
+        }
     }
 
     if let Err(err) = serve().await {

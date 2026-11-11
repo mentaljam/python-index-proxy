@@ -45,7 +45,7 @@ async fn uncacheable_package_details_remain_usable_for_the_current_request() {
                 .unwrap()
                 .as_nanos(),
         ));
-        let mut settings = crate::settings::Settings::template();
+        let mut settings = crate::settings::Settings::for_test();
         settings.indices = [(
             "default".into(),
             vec![format!("{endpoint}/simple/{{package}}/")],

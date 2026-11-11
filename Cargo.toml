@@ -37,15 +37,18 @@ serde = { version = "^1.0", features = ["derive"] }
 serde_json = "^1.0"
 sha2 = "^0.11"
 tokio = { version = "^1.54", features = ["full"] }
-toml = "^1.2"
+toml-example = { version = "0.17.2", optional = true }
 tower-http = { version = "^0.6", features = ["compression-gzip", "compression-zstd"] }
 tracing = "^0.1"
 tracing-subscriber = { version = "^0.3", features = ["env-filter"] }
 url = "^2.5"
 uv-normalize = "0.0.99"
 
+[dev-dependencies]
+toml = "^1.2"
+
 [features]
-default = ["storage-fs", "storage-s3", "storage-gcs", "storage-azblob"]
+default = ["config-template", "storage-fs", "storage-s3", "storage-gcs", "storage-azblob"]
 storage-aliyun-drive = ["opendal/services-aliyun-drive"]
 storage-alluxio = ["opendal/services-alluxio"]
 storage-azblob = ["opendal/services-azblob"]
@@ -111,3 +114,4 @@ storage-vercel-blob = ["opendal/services-vercel-blob"]
 storage-webdav = ["opendal/services-webdav"]
 storage-webhdfs = ["opendal/services-webhdfs"]
 storage-yandex-disk = ["opendal/services-yandex-disk"]
+config-template = ["dep:toml-example"]

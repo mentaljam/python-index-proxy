@@ -1,0 +1,15 @@
+path_prefix = "/"
+
+[indices]
+default = [
+    "https://download.pytorch.org/whl/cu121/{package}/",
+    "https://pypi.org/simple/{package}/",
+]
+torch-cu111 = ["https://download.pytorch.org/whl/cu111/{package}/"]
+
+[storage.s3]
+endpoint = "http://127.0.0.1:9000"
+bucket = "python-index-proxy"
+region = "us-east-1"
+access_key_id = "siloadmin"
+secret_access_key = "siloadmin"

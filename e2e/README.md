@@ -5,6 +5,12 @@ real proxy binary and real pip / uv clients against a local HTTP package index.
 Wheels and PEP 658 metadata are generated locally using the Python standard
 library; no package fixtures are downloaded from PyPI.
 
+## Configuration
+
+Run the proxy against the local Silo setup with `cargo run -- settings.local.toml`.
+Generate a documented configuration with `cargo run -- --print-settings-template`.
+Generation is controlled by the `config-template` feature, enabled by default.
+
 ## Index roots
 
 `/{index}/` is an informational HTML page with pip and uv connection examples.
