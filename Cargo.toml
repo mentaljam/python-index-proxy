@@ -28,6 +28,8 @@ html5gum = { version = "0.9.1", default-features = false }
 http = "1"
 http-body = "1"
 humantime-serde = "^1.1"
+metrics = { version = "0.24", optional = true }
+metrics-exporter-prometheus = { version = "0.18", default-features = false, optional = true }
 moka = { version = "^0.12", features = ["future"] }
 opendal = { version = "^0.59", default-features = false, features = [
     "executors-tokio",
@@ -37,6 +39,7 @@ opendal = { version = "^0.59", default-features = false, features = [
 opendal-http-transport-reqwest = { version = "^0.59", default-features = false, features = [
     "rustls",
 ] }
+opendal-layer-observe-metrics-common = { version = "0.59.5", default-features = false, optional = true }
 percent-encoding = "^2.3"
 reqwest = { version = "^0.13", features = [
     "deflate",
@@ -77,6 +80,8 @@ tower = { version = "0.5", features = ["util"] }
 
 [features]
 default = ["config-template", "storage-s3", "storage-gcs", "storage-azblob"]
+config-template = ["dep:toml-example"]
+metrics = ["dep:metrics", "dep:metrics-exporter-prometheus", "dep:opendal-layer-observe-metrics-common", "axum/matched-path"]
 storage-aliyun-drive = ["opendal/services-aliyun-drive"]
 storage-alluxio = ["opendal/services-alluxio"]
 storage-azblob = ["opendal/services-azblob"]
@@ -141,4 +146,3 @@ storage-vercel-blob = ["opendal/services-vercel-blob"]
 storage-webdav = ["opendal/services-webdav"]
 storage-webhdfs = ["opendal/services-webhdfs"]
 storage-yandex-disk = ["opendal/services-yandex-disk"]
-config-template = ["dep:toml-example"]

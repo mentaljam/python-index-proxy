@@ -153,10 +153,17 @@ async fn get_file(
 ) -> Response {
     match state.get_file(index, package, hash, file).await {
         Ok(File::PresignedUrl(url)) => {
+            crate::telemetry::delivery("redirect");
             (StatusCode::TEMPORARY_REDIRECT, [(header::LOCATION, url)]).into_response()
         }
-        Ok(File::Bytes(bytes)) => bytes.into_response(),
-        Ok(File::Stream(stream)) => Body::from_stream(stream).into_response(),
+        Ok(File::Bytes(bytes)) => {
+            crate::telemetry::delivery("bytes");
+            bytes.into_response()
+        }
+        Ok(File::Stream(stream)) => {
+            crate::telemetry::delivery("stream");
+            Body::from_stream(stream).into_response()
+        }
         Ok(File::None) => StatusCode::NOT_FOUND.into_response(),
         Err(err) => error_response(&err),
     }

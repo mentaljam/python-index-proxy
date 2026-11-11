@@ -18,6 +18,7 @@ fmt:
 check:
     cargo fmt --all -- --check
     cargo clippy --locked --all-targets -- -D warnings
+    cargo clippy --locked --all-targets --features metrics -- -D warnings
     uv run --project e2e --locked --no-python-downloads ruff format --check e2e
     uv run --project e2e --locked --no-python-downloads ruff check e2e
     uv run --project e2e --locked --no-python-downloads ty check --project e2e

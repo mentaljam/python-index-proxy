@@ -90,7 +90,9 @@ impl State {
         crate::logging::cache("index", "miss");
         let lease = data.index_refreshes.lease(cache_key.clone());
         let revision = lease.entry.revision.load(Ordering::Acquire);
+        let mut wait = crate::telemetry::Operation::start("index_wait");
         let mut previous = lease.entry.result.lock().await;
+        wait.finish("success");
         if lease.entry.revision.load(Ordering::Acquire) != revision
             && let Some(result) = previous.as_ref()
         {
@@ -106,10 +108,20 @@ impl State {
         }
         let result = match data.index_permits.clone().try_acquire_owned() {
             Ok(permit) => {
-                self.fetch_package_detail(index_slug, package, url_templates, Arc::new(permit))
-                    .await
+                let mut refresh = crate::telemetry::Operation::start("index_refresh");
+                let result = self
+                    .fetch_package_detail(index_slug, package, url_templates, Arc::new(permit))
+                    .await;
+                match &result {
+                    Ok(None) => refresh.finish("not_found"),
+                    _ => refresh.result(&result),
+                }
+                result
             }
-            Err(_) => Err(anyhow::Error::new(ResourceLimit)),
+            Err(_) => {
+                crate::telemetry::rejected("index");
+                Err(anyhow::Error::new(ResourceLimit))
+            }
         };
         if let Ok(Some(detail)) = &result {
             index_cache.insert(cache_key, detail.clone()).await;

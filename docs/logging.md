@@ -72,3 +72,6 @@ The safe diagnostic policy covers application-owned events. Third-party dependen
 events are not sanitized or suppressed by the application; their levels are
 controlled by `RUST_LOG`. To enable detailed application logging without enabling
 dependency diagnostics, use `RUST_LOG=python_index_proxy=debug`.
+
+Optional Prometheus instrumentation is documented in [metrics.md](metrics.md).
+It records metrics independently of log filtering and output format.

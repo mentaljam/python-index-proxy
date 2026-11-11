@@ -39,14 +39,16 @@ impl TryFrom<Settings> for State {
             ..
         } = settings;
 
-        let index_cache = Cache::builder()
-            .time_to_live(index_cache.ttl.into())
-            .max_capacity(index_cache.max_capacity.into())
-            // Account for key, rendered HTML/JSON and source mappings, not allocator overhead.
-            .weigher(|key: &String, value: &Arc<PackageDetail>| {
-                u32::try_from(key.len().saturating_add(value.byte_len())).unwrap_or(u32::MAX)
-            })
-            .build();
+        let index_cache = crate::telemetry::index_cache(
+            Cache::builder()
+                .time_to_live(index_cache.ttl.into())
+                .max_capacity(index_cache.max_capacity.into())
+                // Account for key, rendered HTML/JSON and source mappings, not allocator overhead.
+                .weigher(|key: &String, value: &Arc<PackageDetail>| {
+                    u32::try_from(key.len().saturating_add(value.byte_len())).unwrap_or(u32::MAX)
+                }),
+        )
+        .build();
 
         let public_url = public_url.unwrap_or_else(|| format!("http://{bind}{path_prefix}"));
         let indices_list = format_indices_list(&public_url, &indices).into();

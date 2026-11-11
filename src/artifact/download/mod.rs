@@ -28,12 +28,15 @@ pub(super) async fn download_response(
     };
     let storage = &state.storage;
     let lease = state.download_locks.lease(path.clone());
+    let mut wait = crate::telemetry::Operation::start("artifact_wait");
     let file_guard = tokio::select! {
         biased;
         _ = output.closed() => return,
         guard = lease.entry.lock() => guard,
     };
+    wait.finish("success");
     let mut writer = None;
+    let mut fill = None;
     let mut permit = None;
     let result = async {
         // Same-key waiters can use a completed object even while other fills
@@ -52,8 +55,12 @@ pub(super) async fn download_response(
                 .artifact_permits
                 .clone()
                 .try_acquire_owned()
-                .map_err(|_| ResourceLimit)?,
+                .map_err(|_| {
+                    crate::telemetry::rejected("artifact");
+                    ResourceLimit
+                })?,
         );
+        fill = Some(crate::telemetry::Operation::start("artifact_fill"));
         fill_artifact(
             storage,
             &path,
@@ -73,6 +80,14 @@ pub(super) async fn download_response(
             error = crate::logging::error_kind(&error),
             "Failed to abort artifact upload"
         );
+    }
+    if let Some(fill) = &mut fill {
+        match &result {
+            Err(_) => fill.result(&result),
+            Ok(_) if output.is_closed() => fill.finish("cancelled"),
+            Ok(Some(File::None)) => fill.finish("not_found"),
+            Ok(_) => fill.finish("success"),
+        }
     }
     drop(permit);
     drop(file_guard);

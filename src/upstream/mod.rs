@@ -10,11 +10,23 @@ pub(crate) async fn send(
     url: Url,
     settings: Upstream,
 ) -> anyhow::Result<Response> {
-    tokio::time::timeout(settings.response_header_timeout, client.get(url).send())
+    let mut operation = crate::telemetry::Operation::start("upstream_artifact_headers");
+    let result = tokio::time::timeout(settings.response_header_timeout, client.get(url).send())
         .await
         .context("Upstream response header timeout")
-        .context(UpstreamIndexError)?
         .context(UpstreamIndexError)
+        .and_then(|response| response.context(UpstreamIndexError));
+    if let Ok(response) = &result {
+        crate::telemetry::upstream_response("artifact", response.status().as_u16());
+        operation.finish(if response.status().is_success() {
+            "success"
+        } else {
+            "http_error"
+        });
+    } else {
+        operation.result(&result);
+    }
+    result
 }
 
 pub(crate) async fn chunk(
@@ -23,11 +35,17 @@ pub(crate) async fn chunk(
 ) -> anyhow::Result<Option<Bytes>> {
     // Start the deadline only while polling upstream, excluding storage writes
     // and downstream backpressure between reads.
-    tokio::time::timeout(settings.read_timeout, response.chunk())
+    let mut operation = crate::telemetry::Operation::start("upstream_read");
+    let result = tokio::time::timeout(settings.read_timeout, response.chunk())
         .await
         .context("Upstream read timeout")
-        .context(UpstreamIndexError)?
         .context(UpstreamIndexError)
+        .and_then(|response| response.context(UpstreamIndexError));
+    if let Ok(Some(bytes)) = &result {
+        crate::telemetry::upstream_bytes(bytes.len());
+    }
+    operation.result(&result);
+    result
 }
 
 #[derive(Debug)]
@@ -43,7 +61,8 @@ pub(crate) async fn index_page(
     settings: Upstream,
     max_size: u64,
 ) -> anyhow::Result<Option<IndexPage>> {
-    tokio::time::timeout(settings.index_download_timeout, async {
+    let mut operation = crate::telemetry::Operation::start("upstream_index");
+    let result = tokio::time::timeout(settings.index_download_timeout, async {
         let mut response = tokio::time::timeout(
             settings.response_header_timeout,
             client
@@ -54,6 +73,7 @@ pub(crate) async fn index_page(
         .await
         .context("Upstream response header timeout")??;
         let status = response.status();
+        crate::telemetry::upstream_response("index", status.as_u16());
         if status.is_client_error()
             && !matches!(
                 status,
@@ -90,8 +110,13 @@ pub(crate) async fn index_page(
     })
     .await
     .context("Upstream index download timeout")
-    .context(UpstreamIndexError)?
     .context(UpstreamIndexError)
+    .and_then(|page| page.context(UpstreamIndexError));
+    match &result {
+        Ok(None) => operation.finish("skipped"),
+        _ => operation.result(&result),
+    }
+    result
 }
 
 #[cfg(test)]

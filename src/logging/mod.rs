@@ -109,6 +109,7 @@ pub(crate) async fn request(request: Request, next: Next) -> Response {
         status: None,
         fields: Arc::new(Mutex::new(Fields::default())),
         finished: false,
+        telemetry: crate::telemetry::Http::start(&request),
     };
     let mut response = REQUEST
         .scope(
@@ -121,6 +122,7 @@ pub(crate) async fn request(request: Request, next: Next) -> Response {
         response.headers_mut().insert("x-request-id", value);
     }
     summary.status = Some(response.status());
+    summary.telemetry.headers(response.status().as_u16());
     let (parts, body) = response.into_parts();
     if body.is_end_stream() {
         summary.finish("completed", None);
@@ -144,6 +146,7 @@ struct Summary {
     status: Option<StatusCode>,
     fields: Arc<Mutex<Fields>>,
     finished: bool,
+    telemetry: crate::telemetry::Http,
 }
 
 impl Summary {
@@ -158,6 +161,8 @@ impl Summary {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let status = self.status.map(|status| status.as_u16());
         let error = fields.error.or(error);
+        self.telemetry
+            .finish(outcome, fields.cache, fields.cache_result, error);
         let duration_ms = self.started.elapsed().as_secs_f64() * 1000.0;
         macro_rules! emit {
             ($level:expr) => {
@@ -212,6 +217,11 @@ impl HttpBody for LoggedBody {
             let _entered = this.summary.span.enter();
             this.body.as_mut().poll_frame(cx)
         });
+        if let Poll::Ready(Some(Ok(frame))) = &result
+            && let Some(bytes) = frame.data_ref()
+        {
+            this.summary.telemetry.bytes(bytes.len());
+        }
         match &result {
             Poll::Ready(Some(Err(_))) => this.summary.finish("body_error", Some("response_body")),
             Poll::Ready(None) => this.summary.finish("completed", None),

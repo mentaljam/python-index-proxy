@@ -18,6 +18,7 @@ mod settings;
 mod shutdown;
 mod state;
 mod storage;
+mod telemetry;
 mod upstream;
 
 #[cfg(test)]
@@ -63,7 +64,7 @@ async fn serve(settings: Settings) -> anyhow::Result<()> {
     let path_prefix = settings.path_prefix.clone();
     let state: state::State = settings.try_into()?;
     let shutdown = state.0.shutdown.clone();
-    let router = get_router(&path_prefix);
+    let router = telemetry::install(get_router(&path_prefix), &path_prefix)?;
 
     let listener = TcpListener::bind(bind).await?;
     tracing::info!(bind = %bind, "Listening");

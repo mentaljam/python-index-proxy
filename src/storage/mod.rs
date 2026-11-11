@@ -44,7 +44,7 @@ macro_rules! storage_backends {
                 );
                 let transport = http::transport(http)?;
                 let context = op.base_context().with_http_transport(transport);
-                Ok(op.with_context(context))
+                Ok(crate::telemetry::storage(op.with_context(context)))
             }
         }
     };
